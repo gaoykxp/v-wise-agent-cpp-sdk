@@ -1,4 +1,4 @@
-# vOBU
+# V-Wise Agent CPP SDK
 bin: /usr/bin
 log /mnt/data/log
 conf /etc
