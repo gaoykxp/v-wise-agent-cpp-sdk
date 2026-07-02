@@ -1,0 +1,40 @@
+{
+    "Url": {
+        "LatencyLogUrl": "http://hdpf.dev.internal.virtueit.net:81/v0-snapshot//messageservice//message/obu-delay",
+        "RegisterUrl": "http://101.133.138.116:8889/carRegisterMgmt/regist",
+        "RegisterConfirmUrl": "http://101.133.138.116:8889/carRegisterMgmt/regist/confirm",
+        "AuthUrl": "http://101.133.138.116:8889/carAuth/auth",
+        "ServiceInfoUrl": "http://101.133.138.116:8889/app/serviceInfo",
+        "AuthTokenUrl": "http://101.133.138.116:8889/auth/token?security=",
+        "QueryEmqxByIdUrl": "http://101.133.138.116:8889/InfoSystemMgmt/queryEmqxById/"
+    },
+    "Obu": {
+        "Imei": "868371055248377",
+        "DeviceType": "OBU",
+        "DeviceName": "40061540",
+        "DeviceId": "865697040171872",
+        "CarInfo": "{\"car_info\":[{\"car_id\":\"NJG_TST_22009\",\"target_info\":[{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0},{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0}]},{\"car_id\":\"NJG_TST_22014\",\"target_info\":[{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0},{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0}]}]}",
+        "ProductKey": "05ZI10sub0u",
+        "ProductSecret": "b56bca925f22b21acf6d75ca4f9b0ed0",
+        "ObuIp": "10.201.17.14",
+        "ClientIp": "10.201.17.14",
+        "UdpClientPort": 30305,
+        "UdpServerPort": 30303,
+        "Longitude": "121.61079700",
+        "Latitude": "31.2536513",
+        "Altitude": "0.5",
+        "Heading": "20099",
+        "specialVehicle": 0,
+        "HazardLights": 0,
+        "HardBraking": 1,
+        "RtReport": 0,
+        "AuthEnable":0
+    },
+    "V2X": {
+        "SenderAid": "123",
+        "ReceiverAid": "17",
+        "SenderPeriod": "1",
+        "SenderPriority": "255",
+        "SenderAidc": "0"
+    }
+}

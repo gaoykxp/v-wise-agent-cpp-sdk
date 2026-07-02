@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la include/zd_*.h)",
+      "Bash(ls -la src/*.cpp)"
+    ]
+  }
+}
