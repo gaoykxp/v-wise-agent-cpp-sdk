@@ -53,8 +53,8 @@ namespace cmsr
             std::thread([this]() {
                 std::random_device rd;
                 std::mt19937 gen(rd());
-                std::uniform_real_distribution<> lat_dist(39.0, 41.0);
-                std::uniform_real_distribution<> lon_dist(116.0, 118.0);
+                std::uniform_real_distribution<> lat_dist(31.247656, 31.247676);
+                std::uniform_real_distribution<> lon_dist(121.612243, 121.612263);
                 std::uniform_real_distribution<> alt_dist(10.0, 100.0);
                 std::uniform_real_distribution<> speed_dist(0.0, 30.0);
                 std::uniform_real_distribution<> course_dist(0.0, 360.0);

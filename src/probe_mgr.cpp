@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <random>
+#include <vector>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -24,6 +26,18 @@ namespace {
     using json = nlohmann::json;
 #define FAULT_FILE_SIM "faultSim"
 #define FAULT_FILE_NET "faultNet"
+
+    // 无线错误码集合，按需随机选取一条用于平台异常监测展示
+    std::string pickWirelessErrorCode() {
+        static const std::vector<std::string> kErrorCodes = {
+            "WEAK_SIGNAL", "NET_RESOURCE_SHORT", "NO_NET_RESOURCE",
+            "G4G5_SWITCH", "REBOOT", "BANDWIDTH_CONFLICT",
+            "REGISTER_FAIL", "SWITCH_FAIL"
+        };
+        static thread_local std::mt19937 gen(std::random_device{}());
+        std::uniform_int_distribution<std::size_t> dist(0, kErrorCodes.size() - 1);
+        return kErrorCodes[dist(gen)];
+    }
 
     bool isFileExists(const std::string &filename) {
         std::ifstream file(filename);
@@ -341,6 +355,9 @@ namespace cmsr {
                         break;
                 }
             }
+
+            // 错误码：从预设集合随机选取，随 reg_stat 之后写入 wireless
+            jpb["wireless"]["error_code"] = pickWirelessErrorCode();
 
             std::string apn;
             module.getAPN(0, 1, apn);
@@ -842,11 +859,11 @@ namespace cmsr {
         // 解析 sys/commands 下发的采集配置指令，动态调整上传内容与频率
         // 指令格式：{"cmd_type":"collection_config","vid":...,"category":"full|core","interval_sec":N,"retention_days":N,"name":...}
         void ProbeMgr::proccessCollectionConfig(const nlohmann::json &j) {
-            // 作用域匹配：vid 非空且与本设备 imei 不符则忽略
-            if (j.contains("vid") && j["vid"].is_string()) {
-                std::string vid = j["vid"].get<std::string>();
-                if (!vid.empty() && vid != m_imei) {
-                    LogInfo << "collection_config ignored, vid mismatch: cmd=" << vid << ", device=" << m_imei;
+            // imei 非空且与本设备 imei 不符则忽略
+            if (j.contains("imei") && j["imei"].is_string()) {
+                std::string imei = j["imei"].get<std::string>();
+                if (!imei.empty() && imei != m_imei) {
+                    LogInfo << "collection_config ignored, imei mismatch: cmd=" << imei << ", device=" << m_imei;
                     return;
                 }
             }
