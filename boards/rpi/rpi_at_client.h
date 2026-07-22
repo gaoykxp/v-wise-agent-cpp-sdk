@@ -63,6 +63,13 @@ struct CellInfo {
     bool valid{false};
 };
 
+// 一次 AT+QENG="servingcell" 查询的合并结果：NR 信号 + 服务小区
+// 供 get_nr_signal / get_serving_cell 共享同一次 AT 查询，避免重复下发
+struct ServingCellInfo {
+    std::optional<NrSignalInfo> nr_signal;
+    std::optional<CellInfo> cell;
+};
+
 // Network registration status
 struct NetworkRegStatus {
     int stat{0};               // 0=not registered, 1=registered home, 2=searching, 3=denied, 4=unknown, 5=roaming
@@ -173,6 +180,7 @@ public:
 
     // ============== Cell Information ==============
     std::optional<CellInfo> get_serving_cell();              // AT+QENG="servingcell"
+    ServingCellInfo get_servingcell_info();                  // 一次 AT+QENG="servingcell" 同时取 NR 信号与服务小区
     std::optional<CellInfo> get_lte_cell_info();             // LTE cell info
     std::optional<CellInfo> get_nr_cell_info();              // 5G NR cell info
 

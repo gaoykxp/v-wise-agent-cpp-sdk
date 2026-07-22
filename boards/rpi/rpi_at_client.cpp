@@ -735,65 +735,21 @@ std::optional<LteSignalInfo> AtClient::get_lte_signal()
     return std::nullopt;
 }
 
-std::optional<NrSignalInfo> AtClient::get_nr_signal()
+// 一次 AT+QENG="servingcell" 查询，同时解析 NR 信号与服务小区
+// 供 get_nr_signal / get_serving_cell 共享同一次 AT 查询，避免重复下发
+ServingCellInfo AtClient::get_servingcell_info()
 {
-    // Use AT+QENG="servingcell" for NR signal info
+    ServingCellInfo result;
     auto r = command("AT+QENG=\"servingcell\"", std::chrono::milliseconds(2000));
     if (!r.ok)
-        return std::nullopt;
+        return result;
 
     // 打印模组对 AT+QENG="servingcell" 的原始回复，便于核对 NR5G 字段列序
     for (const auto& l : r.lines) {
         LogInfo << "[QENG servingcell raw] " << l;
     }
 
-    for (const auto& l : r.lines) {
-        if (!starts_with(l, "+QENG:"))
-            continue;
-
-        auto parts = split_csv(l.substr(std::string("+QENG:").size()));
-        // +QENG: "servingcell","NOCONN","NR5G-SA",<freq>,...
-        // or +QENG: "servingcell","CONNECT",<mode>,...
-        if (parts.size() >= 3) {
-            std::string state = trim(parts[1]);
-            std::string mode = trim(parts[2]);
-
-            // Check for NR5G-SA or NR5G-NSA
-            if (mode.find("NR5G") != std::string::npos) {
-                // NR5G-SA 实际字段列序（按模组响应）：
-                //   +QENG: "servingcell","NOCONN","NR5G-SA","TDD",<mcc>,<mnc>,<cellID>,<pcid>,<tac>,<arfcn>,<band>,<bw>,<rsrp>,<rsrq>,<sinr>,<srxlev>,<scs>
-                //   parts:  [0]          [1]      [2]        [3]    [4]   [5]   [6]      [7]    [8]   [9]     [10]   [11]  [12]   [13]   [14]   [15]     [16]
-                // rsrp/rsrq/sinr 已为 dBm/dB，直接取用无需换算
-                NrSignalInfo info;
-                if (parts.size() >= 15) {
-                    auto rsrp_opt = parse_int(parts[12]);
-                    auto rsrq_opt = parse_int(parts[13]);
-                    auto sinr_opt = parse_int(parts[14]);
-
-                    // RSRP 为 dBm 负值；过滤 0/无效占位，避免误报
-                    if (rsrp_opt && *rsrp_opt < 0) {
-                        info.rsrp = *rsrp_opt;
-                        info.rsrq = rsrq_opt.value_or(-999);
-                        info.sinr = sinr_opt.value_or(-999);
-                        info.valid = true;
-                        return info;
-                    }
-                }
-            }
-        }
-    }
-
-    return std::nullopt;
-}
-
-// ============== Cell Information ==============
-
-std::optional<CellInfo> AtClient::get_serving_cell()
-{
-    auto r = command("AT+QENG=\"servingcell\"", std::chrono::milliseconds(2000));
-    if (!r.ok)
-        return std::nullopt;
-
+    bool cell_taken = false;  // 服务小区只取第一个 servingcell 行（与原 get_serving_cell 行为一致）
     for (const auto& l : r.lines) {
         if (!starts_with(l, "+QENG:"))
             continue;
@@ -806,41 +762,73 @@ std::optional<CellInfo> AtClient::get_serving_cell()
         if (type != "\"servingcell\"" && type != "servingcell")
             continue;
 
-        CellInfo info;
         std::string mode = trim(parts[2]);
 
-        // LTE format: +QENG: "servingcell","NOCONN","LTE",<mcc>,<mnc>,<cellid>,<pci>,<earfcn>,<freq>,<band>,...
-        // NR5G-SA: +QENG: "servingcell","NOCONN","NR5G-SA","TDD",<mcc>,<mnc>,<cellID>,<pcid>,<tac>,<arfcn>,<band>,<bw>,<rsrp>,<rsrq>,<sinr>,<srxlev>,<scs>
-        // GSM format: +QENG: "servingcell","NOCONN","GSM",...
-
-        if (mode.find("LTE") != std::string::npos && parts.size() >= 9) {
-            info.mcc = trim(parts[3]);
-            info.mnc = trim(parts[4]);
-            info.cell_id = trim(parts[5]);
-            info.pci = trim(parts[6]);
-            info.earfcn = trim(parts[7]);
-            info.band = trim(parts[9]);
-            info.valid = true;
-        } else if (mode.find("NR5G") != std::string::npos && parts.size() >= 9) {
-            // parts[4]=mcc, [5]=mnc, [6]=cellID(十六进制), [7]=pcid, [8]=tac(十六进制)
-            info.mcc = trim(parts[4]);
-            info.mnc = trim(parts[5]);
-            info.cell_id = trim(parts[6]);
-            info.pci = trim(parts[7]);
-            info.tac = trim(parts[8]);
-            info.valid = true;
-        } else if (mode.find("GSM") != std::string::npos && parts.size() >= 8) {
-            info.mcc = trim(parts[3]);
-            info.mnc = trim(parts[4]);
-            info.cell_id = trim(parts[5]);
-            info.tac = trim(parts[7]); // LAC for GSM
-            info.valid = true;
+        // ---- 服务小区：仅第一个 servingcell 行 ----
+        // LTE:  +QENG: "servingcell","NOCONN","LTE",<mcc>,<mnc>,<cellid>,<pci>,<earfcn>,<freq>,<band>,...
+        // NR5G: +QENG: "servingcell","NOCONN","NR5G-SA","TDD",<mcc>,<mnc>,<cellID>,<pcid>,<tac>,<arfcn>,<band>,<bw>,<rsrp>,<rsrq>,<sinr>,<srxlev>,<scs>
+        // GSM:  +QENG: "servingcell","NOCONN","GSM",...
+        if (!cell_taken) {
+            cell_taken = true;
+            CellInfo info;
+            if (mode.find("LTE") != std::string::npos && parts.size() >= 9) {
+                info.mcc = trim(parts[3]);
+                info.mnc = trim(parts[4]);
+                info.cell_id = trim(parts[5]);
+                info.pci = trim(parts[6]);
+                info.earfcn = trim(parts[7]);
+                info.band = trim(parts[9]);
+                info.valid = true;
+            } else if (mode.find("NR5G") != std::string::npos && parts.size() >= 9) {
+                // parts[4]=mcc, [5]=mnc, [6]=cellID(十六进制), [7]=pcid, [8]=tac(十六进制)
+                info.mcc = trim(parts[4]);
+                info.mnc = trim(parts[5]);
+                info.cell_id = trim(parts[6]);
+                info.pci = trim(parts[7]);
+                info.tac = trim(parts[8]);
+                info.valid = true;
+            } else if (mode.find("GSM") != std::string::npos && parts.size() >= 8) {
+                info.mcc = trim(parts[3]);
+                info.mnc = trim(parts[4]);
+                info.cell_id = trim(parts[5]);
+                info.tac = trim(parts[7]); // LAC for GSM
+                info.valid = true;
+            }
+            if (info.valid)
+                result.cell = info;
         }
 
-        return info.valid ? std::optional<CellInfo>{info} : std::nullopt;
+        // ---- NR 信号：NR5G 行解析 rsrp/rsrq/sinr（parts[12/13/14]，已为 dBm/dB）----
+        if (mode.find("NR5G") != std::string::npos && !result.nr_signal && parts.size() >= 15) {
+            auto rsrp_opt = parse_int(parts[12]);
+            auto rsrq_opt = parse_int(parts[13]);
+            auto sinr_opt = parse_int(parts[14]);
+
+            // RSRP 为 dBm 负值；过滤 0/无效占位，避免误报
+            if (rsrp_opt && *rsrp_opt < 0) {
+                NrSignalInfo ns;
+                ns.rsrp = *rsrp_opt;
+                ns.rsrq = rsrq_opt.value_or(-999);
+                ns.sinr = sinr_opt.value_or(-999);
+                ns.valid = true;
+                result.nr_signal = ns;
+            }
+        }
     }
 
-    return std::nullopt;
+    return result;
+}
+
+std::optional<NrSignalInfo> AtClient::get_nr_signal()
+{
+    return get_servingcell_info().nr_signal;
+}
+
+// ============== Cell Information ==============
+
+std::optional<CellInfo> AtClient::get_serving_cell()
+{
+    return get_servingcell_info().cell;
 }
 
 std::optional<CellInfo> AtClient::get_lte_cell_info()

@@ -316,16 +316,18 @@ namespace cmsr {
                 }
             }
 
-            rpi::NetworkSignalInfo signalInfo{};
-            if (module.getNetworkSignalInfo(0, signalInfo)) {
+            // 一次 AT 查询同时获取信号与小区信息（避免重复 AT+QENG="servingcell"）
+            auto wirelessInfo = module.getNetworkWirelessInfo(0);
+            const auto &signalInfo = wirelessInfo.signal;
+            const auto &cell_info = wirelessInfo.cell;
+            if (wirelessInfo.signal_valid) {
                 jpb["wireless"]["net_type"] = signalInfo.technology;
                 jpb["wireless"]["rsrp"] = signalInfo.rsrp;
                 jpb["wireless"]["rsrq"] = signalInfo.rsrq;
                 jpb["wireless"]["sinr"] = signalInfo.sinr;
             }
-            rpi::NetworkCellInfo cell_info{};
             jpb["wireless"]["reg_stat"] = "UNKNOWN";
-            if (module.getNetworkCellInfo(0, cell_info)) {
+            if (wirelessInfo.cell_valid) {
                 // std::cout << "Return Action Type: " << cell_info.reg_act_type << std::endl;
                 jpb["wireless"]["cid"] = cell_info.cell_id;
                 jpb["wireless"]["tac"] = cell_info.tac;

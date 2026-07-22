@@ -368,6 +368,54 @@ namespace rpi {
         return false;
     }
 
+    // 一次 AT 查询同时获取信号与小区信息，避免重复下发 AT+QENG="servingcell"
+    RPIModuleInterface::NetworkWirelessInfo RPIModuleInterface::getNetworkWirelessInfo(int sim_id) {
+        NetworkWirelessInfo wi;
+        wi.signal.sim_slot = sim_id;
+        wi.cell.sim_slot = sim_id;
+        wi.signal.technology = "Unknown";
+
+        if (!m_atClient.is_connected()) {
+            return wi;
+        }
+
+        SimSlotGuard guard(m_atClient, sim_id);
+        if (!guard.success() && isDualSimSupported()) {
+            return wi;
+        }
+
+        // 一次 AT+QENG="servingcell" 同时取 NR 信号与服务小区
+        auto sc = m_atClient.get_servingcell_info();
+
+        // 信号：NR 优先，LTE 回退
+        if (sc.nr_signal && sc.nr_signal->valid) {
+            wi.signal.technology = "NR5G";
+            wi.signal.rsrp = sc.nr_signal->rsrp;
+            wi.signal.rsrq = sc.nr_signal->rsrq;
+            wi.signal.sinr = sc.nr_signal->sinr;
+            wi.signal_valid = true;
+        } else {
+            auto lte_signal = m_atClient.get_lte_signal();
+            if (lte_signal && lte_signal->valid) {
+                wi.signal.technology = "LTE";
+                wi.signal.rsrp = lte_signal->rsrp;
+                wi.signal.rsrq = lte_signal->rsrq;
+                wi.signal.sinr = lte_signal->sinr;
+                wi.signal_valid = true;
+            }
+        }
+
+        // 小区信息
+        if (sc.cell && sc.cell->valid) {
+            wi.cell.cell_id = sc.cell->cell_id;
+            wi.cell.tac = sc.cell->tac;
+            wi.cell.reg_stat = 1;  // Registered
+            wi.cell_valid = true;
+        }
+
+        return wi;
+    }
+
     bool RPIModuleInterface::getSimInfo(int sim_id, SimInfo& sim_info) {
         sim_info.sim_slot = sim_id;
 

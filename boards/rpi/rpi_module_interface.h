@@ -105,6 +105,15 @@ namespace rpi {
         NetworkServiceStatus getNetworkServiceStatus(int sim_id);
         bool getNetworkSignalInfo(int sim_id, NetworkSignalInfo& signal_info);
         bool getNetworkCellInfo(int sim_id, NetworkCellInfo& cell_info);
+
+        // 一次 AT 查询同时获取信号与小区信息，避免重复下发 AT+QENG="servingcell"
+        struct NetworkWirelessInfo {
+            NetworkSignalInfo signal;
+            NetworkCellInfo cell;
+            bool signal_valid{false};
+            bool cell_valid{false};
+        };
+        NetworkWirelessInfo getNetworkWirelessInfo(int sim_id);
         bool getSimInfo(int sim_id, SimInfo& sim_info);
         bool getDeviceInfo(DeviceInfo& devinfo);
 
