@@ -144,6 +144,12 @@ namespace rpi {
         std::vector<unsigned long long> getCpuTime();
         float getCpuUsage();
 
+        // ============== GNSS (RM520N-GL integrated) ==============
+        // 开启 GNSS：AT+QGPS=<mode>（1=standalone）。已开启时返回 ERROR，调用方按"已开"处理
+        bool enableGnss(int mode = 1);
+        // 取定位：AT+CGPSINFO / AT+QGPSLOC，返回有效定位或 nullopt
+        std::optional<tbox::GpsLocation> getGpsLocation();
+
     private:
         RPIModuleInterface() = default;
         ~RPIModuleInterface() = default;

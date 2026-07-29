@@ -62,10 +62,10 @@ namespace rpi {
                 std::cout << "[RPi] AT client connected to " << m_atPort << " at " << m_atBaudRate << " baud" << std::endl;
 
                 // ---- URC setup ----
-                // Register default URC handlers. Note: +CEREG/+CREG are intentionally
-                // NOT subscribed here because their URC lines share the response
-                // prefix with AT+CEREG?/AT+CREG? and cannot be distinguished by
-                // prefix alone. They keep using polling.
+                // 注册默认 URC handler（仅打印）。RM520N-GL 其余状态 URC（+QUSIM/+QIND/
+                // +CSCON/+CGEV/+CTZV/+CTZE/+CNEC）一并注册打印。
+                // 注：+CEREG/+CREG/+Q5GREG 仍不订阅——其 URC 行与 AT+CEREG?/AT+CREG?/
+                // AT+Q5GREG? 响应前缀相同、无法区分，继续保持轮询。
                 m_atClient.register_urc_handler("RDY", [](const std::string& l) {
                     std::cout << "[RPi] URC module ready: " << l << std::endl;
                 });
@@ -78,12 +78,39 @@ namespace rpi {
                 m_atClient.register_urc_handler("+CMTI:", [](const std::string& l) {
                     std::cout << "[RPi] URC SMS received: " << l << std::endl;
                 });
+                // ---- RM520N-GL 其余 URC（仅打印）----
+                m_atClient.register_urc_handler("+QUSIM:", [](const std::string& l) {
+                    std::cout << "[RPi] URC USIM status: " << l << std::endl;
+                });
+                m_atClient.register_urc_handler("+QIND:", [](const std::string& l) {
+                    std::cout << "[RPi] URC indication: " << l << std::endl;
+                });
+                m_atClient.register_urc_handler("+CSCON:", [](const std::string& l) {
+                    std::cout << "[RPi] URC RRC state: " << l << std::endl;
+                });
+                m_atClient.register_urc_handler("+CGEV:", [](const std::string& l) {
+                    std::cout << "[RPi] URC PDP event: " << l << std::endl;
+                });
+                m_atClient.register_urc_handler("+CTZV:", [](const std::string& l) {
+                    std::cout << "[RPi] URC time zone: " << l << std::endl;
+                });
+                m_atClient.register_urc_handler("+CTZE:", [](const std::string& l) {
+                    std::cout << "[RPi] URC time zone: " << l << std::endl;
+                });
+                m_atClient.register_urc_handler("+CNEC:", [](const std::string& l) {
+                    std::cout << "[RPi] URC network error: " << l << std::endl;
+                });
 
                 // Enable selected unsolicited reports (ignore failures: not all
                 // modules support every command).
                 const auto to = std::chrono::milliseconds(1500);
                 m_atClient.command("AT+QSIMSTAT=1", to);   // SIM hot-plug URC
                 m_atClient.command("AT+CNMI=2,1,0,0,0", to); // SMS arrival URC
+                m_atClient.command("AT+CSCON=1", to);    // RRC 连接态 URC
+                m_atClient.command("AT+QINDCSQ=1", to);  // +QIND "csq" 信号 URC
+                m_atClient.command("AT+CGEREP=1", to);   // PDP 上下文事件 URC
+                m_atClient.command("AT+CTZR=1", to);     // 时区 URC (+CTZE)
+                m_atClient.command("AT+CNEC=1", to);     // 网络错误码 URC
                 std::cout << "[RPi] URC framework enabled" << std::endl;
 
                 // Check dual SIM support
@@ -627,6 +654,20 @@ namespace rpi {
 
         if (totalDelta == 0) return 0.0f;
         return (1.0f - static_cast<float>(idleDelta) / static_cast<float>(totalDelta)) * 100.0f;
+    }
+
+    // ============== GNSS (RM520N-GL) ==============
+
+    bool RPIModuleInterface::enableGnss(int mode) {
+        if (!m_atClient.is_connected()) return false;
+        // AT+QGPS=<mode>；若 GNSS 已开启，模组返回 ERROR，此处 false 由调用方按"已开"处理
+        return m_atClient.gps_enable(mode);
+    }
+
+    std::optional<tbox::GpsLocation> RPIModuleInterface::getGpsLocation() {
+        if (!m_atClient.is_connected()) return std::nullopt;
+        // 先 AT+CGPSINFO，回退 AT+QGPSLOC=2；无定位时返回 nullopt
+        return m_atClient.get_location();
     }
 
 }  // namespace rpi

@@ -16,6 +16,7 @@ namespace cmsr {
 			double speed;       /* unit: m/s */
 			uint64_t timestamp;
 			double course;
+			bool valid{false};  /* 当前是否有有效定位 */
 		}GPSData;
 
 		class GPS {

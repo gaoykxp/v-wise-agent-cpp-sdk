@@ -48,7 +48,7 @@ namespace cmsr {
 
                 if(imei_.size()==0)
                 {
-		            imei_ = json_["Obu"].value("Imei", "");
+		            imei_ = json_["Vwise"].value("Imei", "");
 		        }
                 //SDK_DeInit();
                 

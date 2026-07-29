@@ -108,7 +108,7 @@ int main(int argc, char **argv) {
     GPS::getInstance().init();
     GPS::getInstance().start();
 
-    if (1 == common::GlobalData::Instance()->getJson()["Obu"].value("AuthEnable", 0))
+    if (1 == common::GlobalData::Instance()->getJson()["Vwise"].value("AuthEnable", 0))
     {
         while (1)
         {

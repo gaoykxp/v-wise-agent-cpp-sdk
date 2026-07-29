@@ -941,7 +941,7 @@ namespace cmsr {
                     nlohmann::json rwJson(common::GlobalData::Instance()->getRwJson());
                     LogDebug << "rwJson: " << rwJson.dump();
                     if (0 == type || 1 == type) {
-                        rwJson["Obu"]["UUorPC5"] = type;
+                        rwJson["Vwise"]["UUorPC5"] = type;
                     }
                     common::GlobalData::Instance()->setRwJson(rwJson);
                     common::GlobalData::Instance()->writeToFile(rwJson);
