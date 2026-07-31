@@ -9,7 +9,7 @@
         "QueryEmqxByIdUrl": "http://101.133.138.116:8889/InfoSystemMgmt/queryEmqxById/"
     },
     "Vwise": {
-        "Imei": "868371054904509",
+        "Imei": "868371055248377",
         "DeviceType": "V-Wise-Agent",
         "DeviceName": "40061540",
         "DeviceId": "865697040171872",

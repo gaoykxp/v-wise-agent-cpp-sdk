@@ -5,6 +5,7 @@
     > Description: Implementation for Raspberry Pi module interface with dual SIM support
 **********************************************************************************************************************/
 #include "rpi_module_interface.h"
+#include "log.h"
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -16,9 +17,11 @@
 namespace rpi {
 
     // SimSlotGuard implementation - switches to target slot and restores on destruction
-    RPIModuleInterface::SimSlotGuard::SimSlotGuard(tbox::AtClient& client, int target_slot)
-        : client_(client), original_slot_(-1), success_(false)
+    // dual_sim=false（单卡）时为空操作，避免无谓的 AT+QUIMSLOT? 查询
+    RPIModuleInterface::SimSlotGuard::SimSlotGuard(tbox::AtClient& client, int target_slot, bool dual_sim)
+        : client_(client), original_slot_(target_slot), success_(true), dual_sim_(dual_sim)
     {
+        if (!dual_sim_) return;  // 单卡：卡槽不会变，无需查询/切换
         original_slot_ = client_.get_active_sim_slot();
         if (original_slot_ < 0) {
             original_slot_ = 0;  // Default
@@ -33,6 +36,7 @@ namespace rpi {
 
     RPIModuleInterface::SimSlotGuard::~SimSlotGuard()
     {
+        if (!dual_sim_) return;  // 单卡：无需恢复
         // Restore original slot
         int current = client_.get_active_sim_slot();
         if (current >= 0 && current != original_slot_) {
@@ -59,46 +63,62 @@ namespace rpi {
         // Connect AT client if port is configured
         if (!m_atPort.empty() && !m_atClient.is_connected()) {
             if (m_atClient.connect(m_atPort, m_atBaudRate)) {
-                std::cout << "[RPi] AT client connected to " << m_atPort << " at " << m_atBaudRate << " baud" << std::endl;
+                LogInfo <<"[RPi] AT client connected to " << m_atPort << " at " << m_atBaudRate << " baud" ;
 
                 // ---- URC setup ----
-                // 注册默认 URC handler（仅打印）。RM520N-GL 其余状态 URC（+QUSIM/+QIND/
-                // +CSCON/+CGEV/+CTZV/+CTZE/+CNEC）一并注册打印。
-                // 注：+CEREG/+CREG/+Q5GREG 仍不订阅——其 URC 行与 AT+CEREG?/AT+CREG?/
-                // AT+Q5GREG? 响应前缀相同、无法区分，继续保持轮询。
+                // 注册 URC handler（仅打印）。RM520N-GL 状态 URC 一并注册：
+                // +QUSIM/+QIND/+CSCON/+CGEV/+CTZV/+CTZE/+CNEC，以及与 AT 查询响应前缀
+                // 冲突的注册类 +QUIMSLOT/+CEREG/+CREG/+Q5GREG/+QSIMSTAT。
+                // 冲突类由 reader_loop 的 isCollidingResponseLine 命令感知判定安全处理：
+                // 执行同族查询时当响应缓冲、否则当 URC 派发，不会吞掉查询结果。
                 m_atClient.register_urc_handler("RDY", [](const std::string& l) {
-                    std::cout << "[RPi] URC module ready: " << l << std::endl;
+                    LogInfo <<"[RPi] URC module ready: " << l ;
                 });
                 m_atClient.register_urc_handler("+CFUN:", [](const std::string& l) {
-                    std::cout << "[RPi] URC radio function: " << l << std::endl;
+                    LogInfo <<"[RPi] URC radio function: " << l ;
                 });
                 m_atClient.register_urc_handler("+QSIMSTAT:", [](const std::string& l) {
-                    std::cout << "[RPi] URC SIM status: " << l << std::endl;
+                    LogInfo <<"[RPi] URC SIM status: " << l ;
                 });
                 m_atClient.register_urc_handler("+CMTI:", [](const std::string& l) {
-                    std::cout << "[RPi] URC SMS received: " << l << std::endl;
+                    LogInfo <<"[RPi] URC SMS received: " << l ;
                 });
                 // ---- RM520N-GL 其余 URC（仅打印）----
                 m_atClient.register_urc_handler("+QUSIM:", [](const std::string& l) {
-                    std::cout << "[RPi] URC USIM status: " << l << std::endl;
+                    LogInfo <<"[RPi] URC USIM status: " << l ;
                 });
                 m_atClient.register_urc_handler("+QIND:", [](const std::string& l) {
-                    std::cout << "[RPi] URC indication: " << l << std::endl;
+                    LogInfo <<"[RPi] URC indication: " << l ;
                 });
                 m_atClient.register_urc_handler("+CSCON:", [](const std::string& l) {
-                    std::cout << "[RPi] URC RRC state: " << l << std::endl;
+                    LogInfo <<"[RPi] URC RRC state: " << l ;
                 });
                 m_atClient.register_urc_handler("+CGEV:", [](const std::string& l) {
-                    std::cout << "[RPi] URC PDP event: " << l << std::endl;
+                    LogInfo <<"[RPi] URC PDP event: " << l ;
                 });
                 m_atClient.register_urc_handler("+CTZV:", [](const std::string& l) {
-                    std::cout << "[RPi] URC time zone: " << l << std::endl;
+                    LogInfo <<"[RPi] URC time zone: " << l ;
                 });
                 m_atClient.register_urc_handler("+CTZE:", [](const std::string& l) {
-                    std::cout << "[RPi] URC time zone: " << l << std::endl;
+                    LogInfo <<"[RPi] URC time zone: " << l ;
                 });
                 m_atClient.register_urc_handler("+CNEC:", [](const std::string& l) {
-                    std::cout << "[RPi] URC network error: " << l << std::endl;
+                    LogInfo <<"[RPi] URC network error: " << l ;
+                });
+                // ---- 与 AT 查询响应前缀冲突的注册类 URC ----
+                // reader_loop 已加命令感知判定(isCollidingResponseLine)：执行同族查询时
+                // 当响应缓冲、否则当 URC 派发，故可安全订阅。
+                m_atClient.register_urc_handler("+QUIMSLOT:", [](const std::string& l) {
+                    LogInfo <<"[RPi] URC SIM slot: " << l ;
+                });
+                m_atClient.register_urc_handler("+CEREG:", [](const std::string& l) {
+                    LogInfo <<"[RPi] URC EPS reg: " << l ;
+                });
+                m_atClient.register_urc_handler("+CREG:", [](const std::string& l) {
+                    LogInfo <<"[RPi] URC GSM reg: " << l ;
+                });
+                m_atClient.register_urc_handler("+Q5GREG:", [](const std::string& l) {
+                    LogInfo <<"[RPi] URC 5G reg: " << l ;
                 });
 
                 // Enable selected unsolicited reports (ignore failures: not all
@@ -111,22 +131,25 @@ namespace rpi {
                 m_atClient.command("AT+CGEREP=1", to);   // PDP 上下文事件 URC
                 m_atClient.command("AT+CTZR=1", to);     // 时区 URC (+CTZE)
                 m_atClient.command("AT+CNEC=1", to);     // 网络错误码 URC
-                std::cout << "[RPi] URC framework enabled" << std::endl;
+                m_atClient.command("AT+CEREG=2", to);    // EPS 注册 URC(带位置)
+                m_atClient.command("AT+CREG=2", to);     // GSM 注册 URC(带位置)
+                m_atClient.command("AT+Q5GREG=1", to);   // 5G 注册 URC(Quectel)
+                LogInfo <<"[RPi] URC framework enabled" ;
 
                 // Check dual SIM support
                 m_dualSimSupported = m_atClient.is_dual_sim_supported();
                 m_dualSimChecked = true;
                 if (m_dualSimSupported) {
-                    std::cout << "[RPi] Dual SIM support detected" << std::endl;
+                    LogInfo <<"[RPi] Dual SIM support detected" ;
                 } else {
-                    std::cout << "[RPi] Single SIM mode" << std::endl;
+                    LogInfo <<"[RPi] Single SIM mode" ;
                 }
             } else {
-                std::cout << "[RPi] Warning: Failed to connect AT client to " << m_atPort << std::endl;
+                LogInfo <<"[RPi] Warning: Failed to connect AT client to " << m_atPort ;
             }
         }
 
-        std::cout << "[RPi] Module initialized" << std::endl;
+        LogInfo <<"[RPi] Module initialized" ;
         return InitStatus::SUCCESS;
     }
 
@@ -145,7 +168,7 @@ namespace rpi {
         m_initialized = false;
         m_dualSimChecked = false;
         m_dualSimSupported = false;
-        std::cout << "[RPi] Module deinitialized" << std::endl;
+        LogInfo <<"[RPi] Module deinitialized" ;
         return true;
     }
 
@@ -160,7 +183,7 @@ namespace rpi {
                 m_atClient.disconnect();
             }
             if (m_atClient.connect(m_atPort, m_atBaudRate)) {
-                std::cout << "[RPi] AT client connected to " << m_atPort << " at " << m_atBaudRate << " baud" << std::endl;
+                LogInfo <<"[RPi] AT client connected to " << m_atPort << " at " << m_atBaudRate << " baud" ;
 
                 // Re-check dual SIM support
                 if (!m_dualSimChecked) {
@@ -278,7 +301,7 @@ namespace rpi {
             return NetworkServiceStatus::UNKNOWN;
         }
 
-        SimSlotGuard guard(m_atClient, sim_id);
+        SimSlotGuard guard(m_atClient, sim_id, isDualSimSupported());
         if (!guard.success() && isDualSimSupported()) {
             return NetworkServiceStatus::UNKNOWN;
         }
@@ -326,7 +349,7 @@ namespace rpi {
         }
 
         // Switch to requested SIM slot (no-op for single SIM)
-        SimSlotGuard guard(m_atClient, sim_id);
+        SimSlotGuard guard(m_atClient, sim_id, isDualSimSupported());
         if (!guard.success() && isDualSimSupported()) {
             signal_info.technology = "Unknown";
             return false;
@@ -372,7 +395,7 @@ namespace rpi {
             return false;
         }
 
-        SimSlotGuard guard(m_atClient, sim_id);
+        SimSlotGuard guard(m_atClient, sim_id, isDualSimSupported());
         if (!guard.success() && isDualSimSupported()) {
             return false;
         }
@@ -406,7 +429,7 @@ namespace rpi {
             return wi;
         }
 
-        SimSlotGuard guard(m_atClient, sim_id);
+        SimSlotGuard guard(m_atClient, sim_id, isDualSimSupported());
         if (!guard.success() && isDualSimSupported()) {
             return wi;
         }
@@ -467,12 +490,28 @@ namespace rpi {
                 return true;
             }
         } else {
-            // Single SIM mode
-            auto status = m_atClient.get_sim_status();
+            // Single SIM mode：IMSI/ICCID 静态值缓存复用，仅每周期查 CPIN? 取状态
+            bool idsCached = m_simIdsCached;
+            std::string cachedImsi, cachedIccid;
+            if (idsCached) {
+                std::lock_guard<std::mutex> lk(m_mutex);
+                cachedImsi = m_cachedImsi;
+                cachedIccid = m_cachedIccid;
+            }
+            auto status = m_atClient.get_sim_status(!idsCached);
             if (status) {
-                sim_info.imsi = status->imsi;
-                sim_info.iccid = status->iccid;
-                sim_info.present = status->ready || !status->iccid.empty();
+                if (idsCached) {
+                    sim_info.imsi = cachedImsi;
+                    sim_info.iccid = cachedIccid;
+                } else {
+                    sim_info.imsi = status->imsi;
+                    sim_info.iccid = status->iccid;
+                    std::lock_guard<std::mutex> lk(m_mutex);
+                    m_cachedImsi = status->imsi;
+                    m_cachedIccid = status->iccid;
+                    m_simIdsCached = true;
+                }
+                sim_info.present = status->ready || !sim_info.iccid.empty();
                 sim_info.status = status->ready ? SimStatus::READY : SimStatus::LOCKED;
                 return true;
             }
@@ -486,6 +525,14 @@ namespace rpi {
     }
 
     bool RPIModuleInterface::getDeviceInfo(DeviceInfo& devinfo) {
+        // 缓存命中：设备信息(厂商/型号/固件/IMEI/SN)运行期不变，直接返回
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            if (m_devInfoCached) {
+                devinfo = m_cachedDeviceInfo;
+                return true;
+            }
+        }
         // Try to get module info from AT commands first
         if (m_atClient.is_connected()) {
             auto module_info = m_atClient.get_module_info();
@@ -495,6 +542,9 @@ namespace rpi {
                 devinfo.modem_model = module_info->model;
                 devinfo.firmware_version = module_info->revision;
                 devinfo.sn = module_info->sn;
+                std::lock_guard<std::mutex> lk(m_mutex);
+                m_cachedDeviceInfo = devinfo;
+                m_devInfoCached = true;
                 return true;
             }
         }

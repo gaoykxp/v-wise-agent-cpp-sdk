@@ -1030,8 +1030,6 @@ namespace cmsr {
             handleMap = {
                     {"/sys/commands", [this](std::string input, std::string topic) { proccessTaskMgr(input, topic); }},
                     {"/user/mgr/up/ack", [this](std::string input, std::string topic) { proccessUserOnline(input, topic); }},
-                    //just for test, gyk
-                    //{"probe/devices/868371055248377/data/up", [this](std::string input, std::string topic) { proccessDataReport(input, topic); }},
                     {"ack", [this](std::string input, std::string topic) { proccessZDFaultAck(input, topic); }}};
             // base_tools::util::creatFilePath("/mnt/data/log/ProbeLog");
 

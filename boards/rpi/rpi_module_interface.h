@@ -159,13 +159,15 @@ namespace rpi {
         // Helper to switch SIM slot and restore
         class SimSlotGuard {
         public:
-            SimSlotGuard(tbox::AtClient& client, int target_slot);
+            // dual_sim=false（单卡）时 guard 为空操作：不查询/切换卡槽，success()恒真
+            SimSlotGuard(tbox::AtClient& client, int target_slot, bool dual_sim);
             ~SimSlotGuard();
             bool success() const { return success_; }
         private:
             tbox::AtClient& client_;
             int original_slot_;
             bool success_;
+            bool dual_sim_;
         };
 
         std::mutex m_mutex;
@@ -176,6 +178,13 @@ namespace rpi {
         int m_atBaudRate = 115200;
         bool m_dualSimSupported = false;
         bool m_dualSimChecked = false;
+
+        // 静态信息缓存（运行期不变，避免每采集周期重复 AT 查询）
+        DeviceInfo m_cachedDeviceInfo{};
+        bool m_devInfoCached = false;
+        std::string m_cachedImsi;
+        std::string m_cachedIccid;
+        bool m_simIdsCached = false;
     };
 
 }  // namespace rpi

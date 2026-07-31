@@ -124,6 +124,28 @@ bool AtClient::is_connected() const
     return port_.is_open();
 }
 
+bool AtClient::isCollidingResponseLine(const std::string& line) {
+    // 仅当正在执行同族 AT 命令（查询/设置）时，把该 URC 前缀的行当作命令响应缓冲，
+    // 避免吞掉 AT+CEREG?/AT+CREG?/AT+Q5GREG?/AT+QUIMSLOT?/AT+QSIMSTAT? 的查询结果。
+    // 注：+CREG 与 +CEREG 前缀不同（"+CREG:" 不是 "+CEREG:" 的前缀，反之亦然），
+    // "AT+CREG" 也不是 "AT+CEREG" 的前缀，二者互不误匹配。
+    std::string cmd;
+    bool inFlight = false;
+    {
+        std::lock_guard<std::mutex> lk(cmd_mtx_);
+        inFlight = (pending_ && !pending_->done);
+        cmd = last_cmd_;
+    }
+    if (!inFlight || cmd.empty()) return false;
+    auto starts = [](const std::string& s, const char* p) { return s.rfind(p, 0) == 0; };
+    if (starts(line, "+CEREG:")    && starts(cmd, "AT+CEREG"))    return true;
+    if (starts(line, "+CREG:")     && starts(cmd, "AT+CREG"))     return true;
+    if (starts(line, "+Q5GREG:")   && starts(cmd, "AT+Q5GREG"))   return true;
+    if (starts(line, "+QUIMSLOT:") && starts(cmd, "AT+QUIMSLOT")) return true;
+    if (starts(line, "+QSIMSTAT:") && starts(cmd, "AT+QSIMSTAT")) return true;
+    return false;
+}
+
 void AtClient::reader_loop()
 {
     using namespace std::chrono_literals;
@@ -138,6 +160,10 @@ void AtClient::reader_loop()
             if (line.empty())
                 continue;
 
+            // [调试] 打印模组从串口输出的每一行原始数据（回显/响应/URC/RDY/OK 等）
+            // 用 LogDebug，可通过环境变量 TANGO_LOG_LEVEL 控制是否输出（1=debug 显示，2=info 隐藏）
+            LogDebug << "[RX ttyUSB2] " << line;
+
             // 1) Final result code -> wake the waiting command().
             if (is_final_result(line)) {
                 std::lock_guard<std::mutex> lk(cmd_mtx_);
@@ -150,7 +176,9 @@ void AtClient::reader_loop()
             }
 
             // 2) Registered URC -> strip from response, dispatch async.
-            if (urc_.is_urc(line)) {
+            //    与 AT 查询响应前缀冲突的 URC（+CEREG/+CREG/+Q5GREG/+QUIMSLOT/+QSIMSTAT）
+            //    在执行同族命令时当响应缓冲，避免吞掉查询结果。
+            if (urc_.is_urc(line) && !isCollidingResponseLine(line)) {
                 urc_.dispatch(line);
                 continue;
             }
@@ -197,6 +225,8 @@ AtResponse AtClient::command(const std::string& cmd, std::chrono::milliseconds t
 
     // Write outside the lock: write() may block and holding cmd_mtx_ here would
     // stall the reader's echo-drop / data-buffer path.
+    // [调试] 打印发给模组的 AT 指令（TANGO_LOG_LEVEL=1 debug 可见，=2 info 隐藏）
+    LogDebug << "[TX ttyUSB2] " << cmd;
     if (!port_.write(cmd + "\r\n")) {
         std::lock_guard<std::mutex> lk(cmd_mtx_);
         pending_.reset();
@@ -370,7 +400,7 @@ std::optional<ModuleInfo> AtClient::get_module_info()
 
 // ============== SIM Card ==============
 
-std::optional<SimStatus> AtClient::get_sim_status()
+std::optional<SimStatus> AtClient::get_sim_status(bool fetch_ids)
 {
     SimStatus status;
 
@@ -398,8 +428,11 @@ std::optional<SimStatus> AtClient::get_sim_status()
         }
     }
 
-    status.imsi = get_imsi().value_or("");
-    status.iccid = get_iccid().value_or("");
+    // IMSI/ICCID 为静态值，调用方可传 fetch_ids=false 跳过（由上层缓存复用）
+    if (fetch_ids) {
+        status.imsi = get_imsi().value_or("");
+        status.iccid = get_iccid().value_or("");
+    }
 
     return status;
 }

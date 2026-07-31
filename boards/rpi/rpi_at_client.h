@@ -150,7 +150,7 @@ public:
     std::optional<ModuleInfo> get_module_info();
 
     // ============== SIM Card ==============
-    std::optional<SimStatus> get_sim_status();
+    std::optional<SimStatus> get_sim_status(bool fetch_ids = true);  // AT+CPIN?(+CIMI+ICCID when fetch_ids)
     bool sim_pin_unlock(const std::string& pin);
 
     // ============== Dual SIM Management (Quectel 5G modules) ==============
@@ -214,6 +214,11 @@ private:
     // registered URC -> dispatch to worker; command echo -> drop; otherwise ->
     // append to the pending command's response buffer.
     void reader_loop();
+
+    // 判定某行是否为“与 AT 查询响应前缀冲突的 URC、且当前正在执行同族命令”：
+    // 若是，应作为命令响应缓冲（不作为 URC 派发），避免吞掉 AT+CEREG?/AT+CREG?/
+    // AT+Q5GREG?/AT+QUIMSLOT?/AT+QSIMSTAT? 等查询结果。
+    bool isCollidingResponseLine(const std::string& line);
 
     SerialPort port_;
 
