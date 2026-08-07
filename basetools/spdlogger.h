@@ -181,6 +181,19 @@ namespace cmsr {
             bool IsInit() const { return is_inited_.load(); }
         };
 
+        // 运行时设置日志级别（同时作用于控制台与文件 sink）
+        // 级别：0=trace 1=debug 2=info 3=warn 4=err 5=critical 6=off
+        // 优先级：环境变量 TANGO_LOG_LEVEL > config.json Vwise.LogLevel > 默认 1
+        inline void setLogLevel(int lvl) {
+            if (lvl < 0) lvl = 0;
+            if (lvl > 6) lvl = 6;
+            auto lv = static_cast<spdlog::level::level_enum>(lvl);
+            Logger<spdlog::logger>::getInstance().GetLogger()->set_level(lv);
+            Logger<spdlog::logger>::getInstance().GetLogger()->flush_on(lv);
+            Logger<spdlog::async_logger>::getInstance().GetLogger()->set_level(lv);
+            Logger<spdlog::async_logger>::getInstance().GetLogger()->flush_on(lv);
+        }
+
         // let logger like stream
         struct log_stream : public std::ostringstream {
         public:

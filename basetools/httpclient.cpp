@@ -6,8 +6,20 @@
 
 #include "httpclient.h"
 #include "log.h"
+#include <cstdio>
 
 namespace base_tools{
+
+// 文件流式写回调（用于大文件下载）
+static size_t WriteToFile(void *buffer, size_t size, size_t nmemb, void *data)
+{
+	FILE *fp = static_cast<FILE*>(data);
+	if (NULL == fp || NULL == buffer)
+	{
+		return CURLE_WRITE_ERROR;
+	}
+	return fwrite(buffer, size, nmemb, fp);
+}
 
 //cib_atomic_t CHttpClient::aGloNum = 0;
 	
@@ -635,6 +647,76 @@ bool CHttpClient::HTCLGets(const std::string & strUrl, const std::vector<std::st
 	}
 	curl_easy_cleanup(curl);
     return true;
+}
+
+bool CHttpClient::HTCLDownloadFile(const std::string & strUrl, const std::string & strFilePath, const std::vector<std::string>& headers, const char * pCaPath)
+{
+	CURLcode res;
+	CURL* curl = curl_easy_init();
+	if(NULL == curl)
+	{
+		return false;
+	}
+	FILE* fp = fopen(strFilePath.c_str(), "wb");
+	if(NULL == fp)
+	{
+		curl_easy_cleanup(curl);
+		return false;
+	}
+
+	if(bDebug)
+	{
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
+		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, Debug);
+	}
+	curl_easy_setopt(curl, CURLOPT_URL, strUrl.c_str());
+
+	struct curl_slist *pChunk = NULL;
+	for (const auto& item : headers)
+	{
+		auto temp = curl_slist_append(pChunk, item.c_str());
+		if (temp)
+		{
+			pChunk = temp;
+		}
+	}
+	if(pChunk != NULL)
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, pChunk);
+
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToFile);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)fp);
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);   // 允许重定向
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);  // 连接超时 30s
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);          // 不限总时长，大文件下载
+	if(NULL == pCaPath)
+	{
+		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, false);
+		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, false);
+	}
+	else
+	{
+		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, true);
+		curl_easy_setopt(curl, CURLOPT_CAINFO, pCaPath);
+	}
+	res = curl_easy_perform(curl);
+
+	fflush(fp);
+	fclose(fp);
+
+	if(pChunk != NULL)
+		curl_slist_free_all(pChunk);
+
+	if(CURLE_OK != res)
+	{
+		std::cout<<curl_easy_strerror((CURLcode)res)<<std::endl;
+		HTCLSetErrInfo(res);
+		curl_easy_cleanup(curl);
+		std::remove(strFilePath.c_str());   // 下载失败清理残文件
+		return false;
+	}
+	curl_easy_cleanup(curl);
+	return true;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////
 

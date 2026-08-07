@@ -71,6 +71,10 @@ namespace cmsr {
 		void start(MQTTAsync_messageArrived* msgSubscriberHandler, MqttBroker broker);
 		void stop();
 		void messageSend(std::string topic, std::string payload);
+		// 返回 sendMessage 是否成功（paho 接受入队即视为成功，QoS0 不保证送达）
+		bool sendOnce(const std::string& topic, const std::string& payload);
+		// 当前是否已连接 broker（复用 paho 连接状态查询）
+		bool isConnected() const;
 		void readJsonFile(const std::string &cfgPath);
 
 		static void connLost(void* context, char* cause);

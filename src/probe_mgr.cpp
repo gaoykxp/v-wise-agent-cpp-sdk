@@ -5,6 +5,7 @@
 **********************************************************************************************************************/
 
 #include "probe_mgr.h"
+#include "ota_manager.h"
 #include "base_timer.h"
 #include "rpi_gps_info.h"
 #include "global.h"
@@ -17,6 +18,7 @@
 #include <functional>
 #include <iostream>
 #include <random>
+#include <thread>
 #include <vector>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -396,10 +398,45 @@ namespace cmsr {
                 if (isFileExists(FAULT_FILE_NET) && readFileLine(FAULT_FILE_NET, fault_str)) {
                     ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_VW_FAULT_UP, fault_str);
                 }
-                // 正常发送数据
-                ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_VW_DATA_UP, zdpb_str);
+                // 正常发送数据（断网时自动缓存，恢复后补传）
+                ProbeMgr::getInstance().publishData(zdpb_str);
                 LogInfo << "ProbeMgrP::mqtt.messageSend topic:" << TOPIC_DVICE_VW_DATA_UP;
             }
+        }
+
+        // 周期采集数据上报（带断连缓存）
+        void ProbeMgr::publishData(const std::string &payload) {
+            if (!m_cacheEnabled) {
+                mqtt.messageSend(TOPIC_DVICE_VW_DATA_UP, payload);
+                return;
+            }
+            int64_t ts = base_tools::BaseTimer::GetMilliTime();
+            if (mqtt.isConnected() && mqtt.sendOnce(TOPIC_DVICE_VW_DATA_UP, payload)) {
+                // 在线直发；若仍有积压则触发后台补传
+                if (!m_offlineCache.empty()) {
+                    flushOfflineCache();
+                }
+            } else {
+                // 断网：写入本地缓存（超 maxAgeMs 自动丢新）
+                m_offlineCache.push(TOPIC_DVICE_VW_DATA_UP, payload, ts);
+            }
+        }
+
+        // 后台逐条回传本地缓存（网络恢复后调用）
+        void ProbeMgr::flushOfflineCache() {
+            bool expected = false;
+            if (!m_flushing.compare_exchange_strong(expected, true)) {
+                return;  // 已有补传在跑
+            }
+            std::thread([this] {
+                size_t n = m_offlineCache.flush(
+                    [](const std::string &topic, const std::string &payload) -> bool {
+                        return ProbeMgr::getInstance().mqtt.isConnected()
+                            && ProbeMgr::getInstance().mqtt.sendOnce(topic, payload);
+                    });
+                LogInfo << "offline cache flushed: " << n << " records";
+                ProbeMgr::getInstance().m_flushing = false;
+            }).detach();
         }
 
         int ProbeMgr::probeTaskSearch(std::string taskId) {
@@ -806,6 +843,12 @@ namespace cmsr {
                         proccessCollectionConfig(j);
                         return;
                     }
+                    // OTA 升级指令分流：cmd_type=="ota_upgrade" 走 OTA 流程
+                    if (j.contains("cmd_type") && j["cmd_type"].is_string() &&
+                        j["cmd_type"].get<std::string>() == "ota_upgrade") {
+                        OtaManager::getInstance().handleOtaCommand(j);
+                        return;
+                    }
                     if (j["task_id"].is_string())
                         j.at("task_id").get_to(tm.taskId);
 
@@ -1035,6 +1078,29 @@ namespace cmsr {
 
             readJsonFile("/etc/rw.conf");
             mqtt.start(ProbeMgr::receiveMsgHandler, broker);
+
+            // 周期采集数据断连缓存初始化（config.json -> Vwise.OfflineCache）
+            {
+                int cacheEnable = 1;
+                int maxAgeMin = 30;
+                const auto& root = common::GlobalData::Instance()->getJson();
+                if (root.contains("Vwise") && root["Vwise"].is_object()) {
+                    const auto& vwise = root["Vwise"];
+                    if (vwise.contains("OfflineCache") && vwise["OfflineCache"].is_object()) {
+                        const auto& oc = vwise["OfflineCache"];
+                        if (oc.contains("Enable") && oc["Enable"].is_number_integer())
+                            cacheEnable = oc["Enable"].get<int>();
+                        if (oc.contains("MaxAgeMin") && oc["MaxAgeMin"].is_number_integer())
+                            maxAgeMin = oc["MaxAgeMin"].get<int>();
+                    }
+                }
+                m_cacheEnabled = (cacheEnable != 0);
+                if (m_cacheEnabled) {
+                    m_offlineCache.init("/mnt/data/log/ProbeCache",
+                                        "/mnt/data/log/ProbeCache/data_cache.json",
+                                        (int64_t)maxAgeMin * 60 * 1000);
+                }
+            }
 
             // 上线
             // m_timerUser.start(5 * 1000, [] { userOnlineSendMsg(); });

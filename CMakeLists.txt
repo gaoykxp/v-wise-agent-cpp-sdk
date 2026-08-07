@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10.2)
-project(v_wise_agent VERSION 1.0.0)
+project(v_wise_agent VERSION 1.0.1)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -35,6 +35,13 @@ include_directories(
         third_party/mqtt/include
         third_party/mqtt/src
 )
+
+# 从 project VERSION 生成版本号头文件（版本号单一来源：上面的 project(... VERSION x.y.z)）
+configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/version.h.in
+        ${CMAKE_CURRENT_BINARY_DIR}/include/version.h
+        @ONLY)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 
 # Use system spdlog if found, otherwise use third_party
 if(NOT spdlog_FOUND)
@@ -120,7 +127,8 @@ if(spdlog_FOUND)
 endif()
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${PROJECT_BINARY_DIR}/conf
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     ${CMAKE_CURRENT_SOURCE_DIR}/data/config.json
-    ${PROJECT_BINARY_DIR}/config.json
+    ${PROJECT_BINARY_DIR}/conf/config.json
 )

@@ -104,9 +104,12 @@ namespace cmsr {
         }
 
         void MQTTAPP::messageSend(std::string topic, std::string payload) {
+            sendOnce(topic, payload);
+        }
+
+        bool MQTTAPP::sendOnce(const std::string &topic, const std::string &payload) {
             if (client == nullptr)
-                return;
-            int rc;
+                return false;
             MQTTAsync_responseOptions resp_opts = MQTTAsync_responseOptions_initializer;
             resp_opts.onSuccess = onSendSuccess;
             resp_opts.onFailure = onSendFailure;
@@ -117,17 +120,16 @@ namespace cmsr {
             pubmsg.qos = QOS;
             pubmsg.retained = 0;
 
-            //int connST = MQTTAsync_isConnected(client);
-            //LogInfo << "MQTTAsync_isConnected: " << connST;
-
-            if ((rc = MQTTAsync_sendMessage(client, topic.data(), &pubmsg, &resp_opts)) != MQTTASYNC_SUCCESS) {
-                 LogError << "Failed to start sendMessage, return code:" << rc;
-                //if (rc == MQTTASYNC_DISCONNECTED) {
-                   // if ((rc = MQTTAsync_reconnect(client)) != MQTTASYNC_SUCCESS) {
-                    //    LogError << "MQTTAsync_reconnect, return code:" << rc;
-                   // }
-                //}
+            int rc = MQTTAsync_sendMessage(client, topic.data(), &pubmsg, &resp_opts);
+            if (rc != MQTTASYNC_SUCCESS) {
+                LogError << "Failed to start sendMessage, return code:" << rc;
+                return false;
             }
+            return true;
+        }
+
+        bool MQTTAPP::isConnected() const {
+            return client != nullptr && MQTTAsync_isConnected(client);
         }
 
         void MQTTAPP::connLost(void *context, char *cause) {

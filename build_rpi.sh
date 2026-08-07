@@ -4,7 +4,7 @@
 set -e
 
 echo "=========================================="
-echo "Building vobu for Raspberry Pi"
+echo "Building v_wise_agent for Raspberry Pi"
 echo "=========================================="
 
 # Check for required dependencies
@@ -68,9 +68,9 @@ echo "=========================================="
 echo "Build complete!"
 echo "=========================================="
 echo ""
-echo "Executable: ${BUILD_DIR}/vobu"
+echo "Executable: ${BUILD_DIR}/v_wise_agent"
 echo ""
 echo "To run:"
 echo "  1. Copy config file: sudo mkdir -p /conf && sudo cp ../data/config.json /conf/"
-echo "  2. Run: ./${BUILD_DIR}/vobu"
+echo "  2. Run: ./${BUILD_DIR}/v_wise_agent"
 echo ""

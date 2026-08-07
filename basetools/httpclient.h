@@ -98,7 +98,17 @@ public:
 		*/	
 //	bool HTCLGets(const std::string & strUrl, std::string & strResponse, const char * pCaPath = NULL);
 	bool HTCLGets(const std::string & strUrl, const std::vector<std::string>& headers, std::string & strResponse, const char * pCaPath = NULL);
-	
+
+	/**
+	* @brief HTTP(S) 下载文件（流式写盘，适合大文件如固件）
+	* @param strUrl 下载地址
+	* @param strFilePath 保存到本地的文件路径
+	* @param headers 请求头
+	* @param pCaPath CA 证书路径，NULL 则不校验服务端证书
+	* @return 返回是否下载成功
+	*/
+	bool HTCLDownloadFile(const std::string & strUrl, const std::string & strFilePath, const std::vector<std::string>& headers, const char * pCaPath = NULL);
+
 	void HTCLClearHeader();
 	
 	int GetErrCode();

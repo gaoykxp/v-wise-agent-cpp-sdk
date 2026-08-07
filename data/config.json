@@ -13,6 +13,7 @@
         "DeviceType": "V-Wise-Agent",
         "DeviceName": "40061540",
         "DeviceId": "865697040171872",
+        "LogLevel": 1,
         "CarInfo": "{\"car_info\":[{\"car_id\":\"NJG_TST_22009\",\"target_info\":[{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0},{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0}]},{\"car_id\":\"NJG_TST_22014\",\"target_info\":[{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0},{\"lat\":320332257,\"lon\":1187027096,\"elevation\":0}]}]}",
         "ProductKey": "05ZI10sub0u",
         "ProductSecret": "b56bca925f22b21acf6d75ca4f9b0ed0",
@@ -26,7 +27,14 @@
         "HazardLights": 0,
         "HardBraking": 1,
         "RtReport": 0,
-        "AuthEnable":0
+        "AuthEnable":0,
+        "OfflineCache": { "Enable": 1, "MaxAgeMin": 30 },
+        "Ota": {
+            "WorkDir": "/mnt/data/ota",
+            "SystemdUnit": "v_wise_agent",
+            "BootCommitSec": 60,
+            "MaxBootAttempts": 3
+        }
     },
     "V2X": {
         "SenderAid": "123",

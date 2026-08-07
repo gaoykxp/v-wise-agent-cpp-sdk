@@ -7,14 +7,17 @@
 #include "authenticate.h"
 #include "global.h"
 #include "log.h"
+#include "ota_manager.h"
 #include "probe_mgr.h"
 #include "rpi_gps_info.h"
 #include "rpi_module_interface.h"
 #include "rpi_serial_port.h"
+#include "version.h"
 #ifdef ENABLE_SATELLITE
 #include "rpi_satellite_terminal.h"
 #endif
 #include <iostream>
+#include <cstdlib>
 #include <string>
 
 using namespace std;
@@ -35,8 +38,33 @@ static const int SATELLITE_BAUD_RATE = 115200;
 int main(int argc, char **argv) {
 
     std::string exe_dir = common::GlobalData::Instance()->programPath();
+
+    // 日志级别：环境变量 TANGO_LOG_LEVEL 优先；未设则取 config.json -> Vwise.LogLevel（默认 1=debug）
+    {
+        const char* envLvl = std::getenv("TANGO_LOG_LEVEL");
+        if (envLvl == nullptr) {
+            int cfgLvl = 1;
+            const auto& root = common::GlobalData::Instance()->getJson();
+            bool vwiseFound = root.contains("Vwise") && root["Vwise"].is_object();
+            if (vwiseFound) {
+                cfgLvl = root["Vwise"].value("LogLevel", 1);
+            }
+            cmsr::logger::setLogLevel(cfgLvl);
+            std::cout << "[loglevel] env TANGO_LOG_LEVEL unset; config Vwise found="
+                      << (vwiseFound ? "yes" : "no") << "; apply LogLevel=" << cfgLvl
+                      << " (0=trace 1=debug 2=info 3=warn 4=err)" << std::endl;
+        } else {
+            std::cout << "[loglevel] env TANGO_LOG_LEVEL=" << envLvl << " (overrides config)" << std::endl;
+        }
+    }
+
+    LogInfo << "V-Wise Agent SDK version: " << VWISE_SDK_VERSION;
     LogInfo << "Current executable path is :" << exe_dir;
     LogInfo << "imei is :" << common::GlobalData::Instance()->getImei();
+
+    // OTA：尽早检查未决升级（提交/回滚），不依赖 MQTT/串口初始化
+    OtaManager::getInstance().init();
+    OtaManager::getInstance().checkPendingOta();
 
     // Initialize serial port for 5G modem
     if (g_serialPort.open(SERIAL_PORT_DEVICE, SERIAL_PORT_BAUD_RATE)) {

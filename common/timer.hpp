@@ -1,4 +1,6 @@
-﻿
+﻿#ifndef COMMON_TIMER_HPP
+#define COMMON_TIMER_HPP
+
 #include <functional>
 #include <chrono>
 #include <thread>
@@ -67,6 +69,8 @@ private:
  std::mutex _mutex;
  std::condition_variable _expired_cond;
 };
+
+#endif // COMMON_TIMER_HPP
 
 
 

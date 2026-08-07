@@ -22,8 +22,8 @@ namespace cmsr {
         namespace common {
 
             GlobalData::GlobalData() {
-                auto config_path = programPath(); // exe_dir, e.g. /system/cmsr/vobu
-                auto file_name = getFileName(config_path); // e.g. vobu
+                auto config_path = programPath(); // exe_dir, e.g. /system/cmsr/v_wise_agent
+                auto file_name = getFileName(config_path); // e.g. v_wise_agent
                 config_path = config_path.substr(0, config_path.size() - file_name.size()); //remove fileName from programPath
                 std::string confName{config_path};
                 confName.append(CONFIG_NAME);

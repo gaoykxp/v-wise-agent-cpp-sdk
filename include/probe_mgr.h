@@ -9,7 +9,9 @@
 
 #include "rpi_cell_info.h"
 #include "mqtt_async_app.h"
+#include "offline_cache.h"
 #include "ping.h"
+#include <atomic>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -77,6 +79,11 @@ namespace cmsr {
             void proccessZDFaultAck(std::string input, std::string topic);
             void proccessDataReport(std::string input, std::string topic); //only for test, GYK
 
+            // 周期采集数据上报（带断连缓存）：在线直发并触发积压补传；断网落盘缓存
+            void publishData(const std::string& payload);
+            // 后台逐条回传本地缓存（网络恢复后调用）
+            void flushOfflineCache();
+
             void vwiseProccessTaskMgrHandle(sTaskMgrInfoPb &tm);
             void vwiseProbeTaskHandle();
             // 解析 sys/commands 下发的采集配置指令，动态调整上传内容与频率
@@ -131,6 +138,11 @@ namespace cmsr {
             //SDK数据采集运行时配置（由 sys/commands 下发的 collection_config 指令动态调整）
             CollectCategory m_collectCategory = CollectFull; // 默认全量
             int m_collectIntervalMs = 3000;                  // 默认3秒，与原定时器一致
+
+            //周期采集数据断连重传
+            OfflineCache m_offlineCache;            // 断网本地缓存
+            std::atomic<bool> m_flushing{false};    // 补传进行中标志（防重入）
+            bool m_cacheEnabled = true;             // 是否启用断连缓存（配置开关）
 
         };
     }//end namespace vwise
