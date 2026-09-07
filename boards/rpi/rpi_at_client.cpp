@@ -138,11 +138,16 @@ bool AtClient::isCollidingResponseLine(const std::string& line) {
     }
     if (!inFlight || cmd.empty()) return false;
     auto starts = [](const std::string& s, const char* p) { return s.rfind(p, 0) == 0; };
-    if (starts(line, "+CEREG:")    && starts(cmd, "AT+CEREG"))    return true;
-    if (starts(line, "+CREG:")     && starts(cmd, "AT+CREG"))     return true;
-    if (starts(line, "+Q5GREG:")   && starts(cmd, "AT+Q5GREG"))   return true;
-    if (starts(line, "+QUIMSLOT:") && starts(cmd, "AT+QUIMSLOT")) return true;
-    if (starts(line, "+QSIMSTAT:") && starts(cmd, "AT+QSIMSTAT")) return true;
+    if (starts(line, "+CEREG:")         && starts(cmd, "AT+CEREG"))         return true;
+    if (starts(line, "+CREG:")          && starts(cmd, "AT+CREG"))          return true;
+    if (starts(line, "+C5GREG:")        && starts(cmd, "AT+C5GREG"))        return true;
+    if (starts(line, "+Q5GREG:")        && starts(cmd, "AT+Q5GREG"))        return true;
+    if (starts(line, "+QUIMSLOT:")      && starts(cmd, "AT+QUIMSLOT"))      return true;
+    if (starts(line, "+QSIMSTAT:")      && starts(cmd, "AT+QSIMSTAT"))      return true;
+    if (starts(line, "+CPIN:")          && starts(cmd, "AT+CPIN"))          return true;
+    if (starts(line, "+CFUN:")          && starts(cmd, "AT+CFUN"))          return true;
+    if (starts(line, "+QIND:")          && starts(cmd, "AT+QIND"))          return true;
+    if (starts(line, "+QNETDEVSTATUS:") && starts(cmd, "AT+QNETDEVSTATUS")) return true;
     return false;
 }
 
@@ -165,11 +170,13 @@ void AtClient::reader_loop()
             LogDebug << "[RX ttyUSB2] " << line;
 
             // 1) Final result code -> wake the waiting command().
+            //    非OK终行原文保留到 err（CMEE=2 时为 verbose 文本，供故障定界）。
             if (is_final_result(line)) {
                 std::lock_guard<std::mutex> lk(cmd_mtx_);
                 if (pending_) {
                     pending_->done = true;
                     pending_->ok = (line == "OK");
+                    if (!pending_->ok) pending_->err = line;
                     pending_->cv.notify_one();
                 }
                 continue;
@@ -179,6 +186,20 @@ void AtClient::reader_loop()
             //    与 AT 查询响应前缀冲突的 URC（+CEREG/+CREG/+Q5GREG/+QUIMSLOT/+QSIMSTAT）
             //    在执行同族命令时当响应缓冲，避免吞掉查询结果。
             if (urc_.is_urc(line) && !isCollidingResponseLine(line)) {
+                // URC 高亮：模组主动上报（非查询响应），定界第 0 层证据的原始来源。
+                // 用 INFO 级 + [URC] 标签与普通 [RX] 区分——默认日志级别(2)下 URC 仍可见，
+                // 控制台按 INFO 颜色渲染，grep '\[URC' 可直接抽取事件时间线。
+                // 注意：与查询同前缀的"伪 URC"（isCollidingResponseLine 命中）不在此列，
+                // 它们是命令响应，仍走 [RX]。
+                LogInfo << "[URC ttyUSB2] " << line;
+                {
+                    // 原始行入缓存（diag.urc 上报）：在派发给 handler 之前追加，
+                    // 与 handler 是否注册/是否处理无关
+                    std::lock_guard<std::mutex> lk(urc_log_mtx_);
+                    if (urc_log_.size() >= kUrcLogCap)
+                        urc_log_.pop_front();
+                    urc_log_.push_back(line);
+                }
                 urc_.dispatch(line);
                 continue;
             }
@@ -241,6 +262,7 @@ AtResponse AtClient::command(const std::string& cmd, std::chrono::milliseconds t
     if (pending_) {
         rsp.ok = pending_->ok;
         rsp.lines = std::move(pending_->lines);
+        rsp.err = std::move(pending_->err);
         pending_.reset();
     }
     cmd_in_flight_ = false;
@@ -257,6 +279,14 @@ AtResponse AtClient::command(const std::string& cmd, std::chrono::milliseconds t
 void AtClient::register_urc_handler(const std::string& prefix, UrcCallback cb)
 {
     urc_.register_handler(prefix, std::move(cb));
+}
+
+std::vector<std::string> AtClient::drain_urc_log()
+{
+    std::lock_guard<std::mutex> lk(urc_log_mtx_);
+    std::vector<std::string> out(urc_log_.begin(), urc_log_.end());
+    urc_log_.clear();
+    return out;
 }
 
 void AtClient::unregister_urc_handler(const std::string& prefix)

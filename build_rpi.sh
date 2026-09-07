@@ -57,7 +57,10 @@ cd ${BUILD_DIR}
 
 echo ""
 echo "Running CMake..."
-cmake ..
+# 模组驱动可选透传：VWISE_MODEM=quectel_5g（默认）/ stub，见 CMakeLists.txt
+# [临时测试] VWISE_TEST_MODULE_RESET=ON 时启用模组软重启验证代码（默认 OFF）
+cmake -DVWISE_MODEM="${VWISE_MODEM:-quectel_5g}" \
+      -DVWISE_TEST_MODULE_RESET="${VWISE_TEST_MODULE_RESET:-OFF}" ..
 
 echo ""
 echo "Compiling..."

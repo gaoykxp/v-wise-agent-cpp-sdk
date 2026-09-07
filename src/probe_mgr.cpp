@@ -10,10 +10,13 @@
 #include "rpi_gps_info.h"
 #include "global.h"
 #include "log.h"
+#include "version.h"   // VWISE_SDK_VERSION（CMake project VERSION 生成，勿手改）
 #ifdef ENABLE_MINIO
 #include "minio.h"
 #endif
 #include "rpi_module_interface.h"
+#include "rpi_at_channel_adapter.h"
+#include "modem_hal.h"
 #include <cstdio>
 #include <functional>
 #include <iostream>
@@ -29,16 +32,64 @@ namespace {
 #define FAULT_FILE_SIM "faultSim"
 #define FAULT_FILE_NET "faultNet"
 
-    // 无线错误码集合，按需随机选取一条用于平台异常监测展示
-    std::string pickWirelessErrorCode() {
-        static const std::vector<std::string> kErrorCodes = {
-            "WEAK_SIGNAL", "NET_RESOURCE_SHORT", "NO_NET_RESOURCE",
-            "G4G5_SWITCH", "REBOOT", "BANDWIDTH_CONFLICT",
-            "REGISTER_FAIL", "SWITCH_FAIL"
-        };
-        static thread_local std::mt19937 gen(std::random_device{}());
-        std::uniform_int_distribution<std::size_t> dist(0, kErrorCodes.size() - 1);
-        return kErrorCodes[dist(gen)];
+    // ==================== 模组驱动（方言层）懒初始化 ====================
+    // RPIModuleInterface::init() 完成后首次采集时绑定 AT 通道并初始化驱动。
+    // 初始化前（模块未就绪）不置位，下一周期重试。
+    bool initModemDriverOnce() {
+        static bool inited = false;
+        static bool ok = false;
+        if (inited) return ok;
+        auto &module = rpi::RPIModuleInterface::getInstance();
+        if (!module.isInitialized()) return false;
+        static vwise::modem::RpiAtChannelAdapter adapter(module.atClient());
+        ok = vwise::modem::modemDriver().init(adapter);
+        inited = true;
+        LogInfo << "modem driver init: " << (ok ? "ok" : "failed") << " (vendor="
+                << vwise::modem::modemDriver().profile().vendor << " model="
+                << vwise::modem::modemDriver().profile().model << ")";
+        return ok;
+    }
+
+    // QENG <state> → 字符串（驻网/注册/业务态，定界关键判据：
+    // LIMSRV=已驻留小区但未注册——指向 SIM/签约/网络侧而非模组硬件）
+    const char* ueStateName(vwise::modem::ServingCell::UeState s) {
+        switch (s) {
+            case vwise::modem::ServingCell::UeState::SEARCH:  return "SEARCH";
+            case vwise::modem::ServingCell::UeState::LIMSRV:  return "LIMSRV";
+            case vwise::modem::ServingCell::UeState::NOCONN:  return "NOCONN";
+            case vwise::modem::ServingCell::UeState::CONNECT: return "CONNECT";
+            default: return "UNKNOWN";
+        }
+    }
+
+    // 注册状态字符串（3GPP TS 27.007 stat 语义 + PDP 事实纠偏后的综合判定）
+    std::string regStatString(const vwise::modem::DiagSnapshot &snap) {
+        if (snap.reg.ps_stat == 3 || snap.reg.cs_stat == 3 || snap.reg.stat_5g == 3)
+            return "REGISTRATION_DENIED";
+        if (snap.effective_registered) {
+            if (snap.reg.ps_stat == 5 || snap.reg.stat_5g == 5) return "REGISTERED_ROAMING";
+            return "REGISTERED_HOME";
+        }
+        if (snap.reg.ps_stat == 2 || snap.reg.stat_5g == 2) return "SEARCHING";
+        return "NOT_REGISTERED";
+    }
+
+    // 无线错误码：按 DiagSnapshot 真实状态推导（SIM/注册被拒/弱信号），
+    // 供平台异常监测展示（替代旧的随机选取）
+    std::string deriveWirelessErrorCode(const rpi::SimInfo &simInfo,
+                                        const vwise::modem::DiagSnapshot &snap,
+                                        int lteThr, int nrThr) {
+        if (simInfo.status == rpi::SimStatus::ABSENT || simInfo.status == rpi::SimStatus::LOCKED) {
+            return "SIM_FAULT";
+        }
+        if (snap.reg.ps_stat == 3 || snap.reg.cs_stat == 3 || snap.reg.stat_5g == 3) {
+            return "REGISTER_FAIL";
+        }
+        if (snap.signal.valid && snap.signal.rsrp != -999) {
+            const int thr = (snap.signal.rat == "NR5G") ? nrThr : lteThr;
+            if (thr > 0 && snap.signal.rsrp <= thr) return "WEAK_SIGNAL";
+        }
+        return "NONE";
     }
 
     bool isFileExists(const std::string &filename) {
@@ -264,8 +315,26 @@ namespace cmsr {
                     // 按照zd_wrapper.h里面定义的json格式填充
                     jpb["system"]["imei"] = devInfo.imei;
                     jpb["system"]["sn"] = devInfo.sn;
-                    jpb["system"]["sw_version"] = devInfo.software_version;
                     jpb["system"]["hw_version"] = devInfo.hardware_version;
+                    // 模组固件版本：AT 实测（AT+CGMR → "RM520NGLAAR03A03M4G"），
+                    // 仅 SDK 启动后首条成功读取的消息携带一次（固件运行期不变，
+                    // 逐条重复携带浪费流量，平台持久化首值即可）。
+                    // AT 未就绪时 boards 走回退（modem_vendor 为空）不置标志，
+                    // 下一 Full 周期重读，直到拿到 AT 实测值为止
+                    static bool s_modemVersionSent = false;
+                    if (!s_modemVersionSent && !devInfo.modem_vendor.empty()) {
+                        jpb["system"]["modem_version"] = devInfo.firmware_version;
+                        s_modemVersionSent = true;
+                    }
+                }
+                // SDK 版本号：编译期单源（CMakeLists project VERSION → version.h 的
+                // VWISE_SDK_VERSION），启动后首条 Full 消息携带一次。
+                // 注：原 sw_version 取 devInfo.software_version——AT 路径该字段恒为空
+                // （模组固件已有 modem_version 承载），语义归位为 SDK 自身版本
+                static bool s_swVersionSent = false;
+                if (!s_swVersionSent) {
+                    jpb["system"]["sw_version"] = VWISE_SDK_VERSION;
+                    s_swVersionSent = true;
                 }
                 jpb["system"]["mem_util"] = static_cast<int>(module.getMemoryUsage());
             }
@@ -283,10 +352,40 @@ namespace cmsr {
                 jpb["system"]["latitude"] = gpsData.latitude;
             }
 
-            // 获取SIM信息（核心模式下仍需采集用于故障判定，但不写入上报payload）
-            rpi::SimInfo simInfo;
+            // ==================== AT 查询节流 ====================
+            // 3s 周期内只允许两类 AT：GNSS 定位（GPS 后台线程，独立节拍）与
+            // AT+QENG="servingcell"（信号/服务小区，每周期刷新，见下方无线段）。
+            // 其余 AT 均为慢变量，每 kSlowAtRefreshMs 全量刷新一次，其余周期复用缓存：
+            //   SIM 状态（AT+CPIN?）、注册三域（AT+C5GREG?/CEREG?/CREG?）、PDP（AT+CGPADDR）
+            // 刷新失败的重试策略见下方分档（曾成功→立即重试；从未成功→仍按节流）。
+            // 注意：静态缓存基于 ProbeMgr 单例；DiagSnapshot 位于全局命名空间，
+            // 此处 cmsr::vwise 内必须写 ::vwise::modem（相对解析会找 cmsr::vwise::modem）
+            static constexpr int64_t kSlowAtRefreshMs = 30000;
+            static int64_t s_lastSlowAtMs = 0;
+            static bool s_snapValid = false;
+            static bool s_hadSnapOnce = false;   // 曾成功取到快照（失败重试策略分档用）
+            static bool s_diagFresh = false;     // 本周期刚完成慢变刷新（diag 节点携带标志）
+            static rpi::SimInfo s_simInfo;
+            static ::vwise::modem::DiagSnapshot s_snap;
+
+            const int64_t nowMs = base_tools::BaseTimer::GetMilliTime();
+            if (nowMs - s_lastSlowAtMs >= kSlowAtRefreshMs) {
+                module.getSimInfo(0, s_simInfo);
+                s_snapValid = initModemDriverOnce() &&
+                              ::vwise::modem::modemDriver().getDiagSnapshot(s_snap);
+                if (s_snapValid) {
+                    s_hadSnapOnce = true;
+                    s_lastSlowAtMs = nowMs;
+                    s_diagFresh = true;
+                } else {
+                    // 曾成功后失败（模组重启/复位）→ 下一周期立即重试；
+                    // 从未成功（无该模组驱动，长期走 boards 回退）→ 仍按节流周期重试，
+                    // 保证回退模式下 CPIN? 也不挤占 3s 周期
+                    s_lastSlowAtMs = s_hadSnapOnce ? 0 : nowMs;
+                }
+            }
+            const rpi::SimInfo &simInfo = s_simInfo;
             {
-                module.getSimInfo(0, simInfo);
                 // std::cout << "SIM IMSI: " << simInfo.imsi << std::endl;
                 // std::cout << "SIM Status: " << static_cast<int>(simInfo.status) << std::endl;
                 // std::cout << "SIM iccid: " << simInfo.iccid << std::endl;
@@ -318,75 +417,178 @@ namespace cmsr {
                 }
             }
 
-            // 一次 AT 查询同时获取信号与小区信息（避免重复 AT+QENG="servingcell"）
-            auto wirelessInfo = module.getNetworkWirelessInfo(0);
-            const auto &signalInfo = wirelessInfo.signal;
-            const auto &cell_info = wirelessInfo.cell;
-            if (wirelessInfo.signal_valid) {
-                jpb["wireless"]["net_type"] = signalInfo.technology;
-                jpb["wireless"]["rsrp"] = signalInfo.rsrp;
-                jpb["wireless"]["rsrq"] = signalInfo.rsrq;
-                jpb["wireless"]["sinr"] = signalInfo.sinr;
-            }
-            jpb["wireless"]["reg_stat"] = "UNKNOWN";
-            if (wirelessInfo.cell_valid) {
-                // std::cout << "Return Action Type: " << cell_info.reg_act_type << std::endl;
-                jpb["wireless"]["cid"] = cell_info.cell_id;
-                jpb["wireless"]["tac"] = cell_info.tac;
-                jpb["wireless"]["reg_err_code"] = cell_info.rej_cause;
+            // ==================== 无线数据 ====================
+            // 信号/服务小区：每周期仅一条 AT+QENG="servingcell"（快路径）覆盖缓存；
+            // 注册/承载等慢变数据来自上方节流刷新的缓存快照（含 SA 注册查询失真纠偏）。
+            // 驱动不可用（未初始化/无该模组驱动）时回退 boards 层原查询路径
+            // （该路径本身也只发 QENG，符合周期内 AT 约束）。
+            bool simFault = (simInfo.status == rpi::SimStatus::ABSENT ||
+                             simInfo.status == rpi::SimStatus::LOCKED);
+            bool netFault = false;
+            std::string rat = "LTE";   // 弱信号阈值分档用
 
-                switch (cell_info.reg_stat) {
-                    case static_cast<int>(rpi::NetworkRegStatus::NOT_REGISTERED):
-                        jpb["wireless"]["reg_stat"] = "NOT_REGISTERED";
-                        break;
-                    case static_cast<int>(rpi::NetworkRegStatus::REGISTERED_HOME):
-                        jpb["wireless"]["reg_stat"] = "REGISTERED_HOME";
-                        break;
-                    case static_cast<int>(rpi::NetworkRegStatus::SEARCHING):
-                        jpb["wireless"]["reg_stat"] = "SEARCHING";
-                        break;
-                    case static_cast<int>(rpi::NetworkRegStatus::REGISTRATION_DENIED):
-                        jpb["wireless"]["reg_stat"] = "REGISTRATION_DENIED";
-                        break;
-                    case static_cast<int>(rpi::NetworkRegStatus::REGISTERED_ROAMING):
-                        jpb["wireless"]["reg_stat"] = "REGISTERED_ROAMING";
-                        break;
-                    case static_cast<int>(rpi::NetworkRegStatus::LIMMITED):
-                        jpb["wireless"]["reg_stat"] = "LIMMITED";
-                        break;
-                    default:
-                        jpb["wireless"]["reg_stat"] = "UNKNOWN";
-                        break;
+            if (s_snapValid) {
+                // 快变刷新：QENG 失败（URC 串扰/模组忙）保留上次值；
+                // 持续失败则强制下一周期走慢变全量刷新重新判定
+                ::vwise::modem::SignalInfo fastSig;
+                ::vwise::modem::ServingCell fastCell;
+                if (::vwise::modem::modemDriver().getServingSignal(fastSig, fastCell)) {
+                    s_snap.signal = fastSig;
+                    s_snap.cell = fastCell;
+                } else {
+                    s_lastSlowAtMs = 0;
+                }
+            }
+            const bool snapOk = s_snapValid;
+            const ::vwise::modem::DiagSnapshot &snap = s_snap;
+
+            if (snapOk) {
+                const auto &sig = snap.signal;
+                if (sig.valid) {
+                    rat = sig.rat;
+                    jpb["wireless"]["net_type"] = sig.rat;
+                    jpb["wireless"]["rsrp"] = sig.rsrp;
+                    jpb["wireless"]["rsrq"] = sig.rsrq;
+                    jpb["wireless"]["sinr"] = sig.sinr;
+                }
+                if (snap.cell.valid) {
+                    jpb["wireless"]["cid"] = snap.cell.cell_id;
+                    jpb["wireless"]["tac"] = snap.cell.tac;
+                    // 拒绝原因码（CEREG stat=3 时的 <reject_cause>，无拒绝时为 0）
+                    jpb["wireless"]["reg_err_code"] = snap.reg.reject_cause;
+                }
+                // UE 驻网态（QENG <state>，3s 快变）：LIMSRV=已驻留未注册，指向 SIM/签约/
+                // 网络侧而非模组硬件。EN-DC 仅状态行时 cell.valid=false 但 ue_state 有效，
+                // 故置于 cell 门控之外
+                jpb["wireless"]["ue_state"] = ueStateName(snap.cell.ue_state);
+                // 注册状态：3GPP 三域综合 + PDP 事实纠偏（effective_registered）
+                jpb["wireless"]["reg_stat"] = regStatString(snap);
+
+                // 模组 vendor/model/version 不在此携带——统一走 system 节点
+                // （AT+CGMI/CGMM/CGMR 实测值，见上方 getDeviceInfo 段；profile 里是驱动
+                // 画像标签，与实物可能不同族成员，不作上报来源）
+
+                // ---- 故障判定布尔（先算后 dump，dump 后不再改判）----
+                const bool denied = snap.reg.ps_stat == 3 || snap.reg.cs_stat == 3 ||
+                                    snap.reg.stat_5g == 3;
+                const bool noCell = !snap.cell.valid;
+                const bool notRegistered = !snap.effective_registered;
+                const bool weakSignal = sig.valid && sig.rsrp != -999 && m_noNetLTEThr > 0 &&
+                                        sig.rsrp <= (rat == "NR5G" ? m_noNet5GThr : m_noNetLTEThr);
+                netFault = noCell || notRegistered || denied || weakSignal;
+
+                jpb["wireless"]["error_code"] = deriveWirelessErrorCode(
+                    simInfo, snap, m_noNetLTEThr, m_noNet5GThr);
+            } else {
+                // ---- 回退路径：boards 层原查询（无方言层驱动时保持可用）----
+                auto wirelessInfo = module.getNetworkWirelessInfo(0);
+                const auto &signalInfo = wirelessInfo.signal;
+                const auto &cell_info = wirelessInfo.cell;
+                if (wirelessInfo.signal_valid) {
+                    rat = signalInfo.technology;
+                    jpb["wireless"]["net_type"] = signalInfo.technology;
+                    jpb["wireless"]["rsrp"] = signalInfo.rsrp;
+                    jpb["wireless"]["rsrq"] = signalInfo.rsrq;
+                    jpb["wireless"]["sinr"] = signalInfo.sinr;
+                }
+                jpb["wireless"]["reg_stat"] = "UNKNOWN";
+                if (wirelessInfo.cell_valid) {
+                    jpb["wireless"]["cid"] = cell_info.cell_id;
+                    jpb["wireless"]["tac"] = cell_info.tac;
+                    jpb["wireless"]["reg_err_code"] = cell_info.rej_cause;
+
+                    switch (cell_info.reg_stat) {
+                        case static_cast<int>(rpi::NetworkRegStatus::NOT_REGISTERED):
+                            jpb["wireless"]["reg_stat"] = "NOT_REGISTERED";
+                            break;
+                        case static_cast<int>(rpi::NetworkRegStatus::REGISTERED_HOME):
+                            jpb["wireless"]["reg_stat"] = "REGISTERED_HOME";
+                            break;
+                        case static_cast<int>(rpi::NetworkRegStatus::SEARCHING):
+                            jpb["wireless"]["reg_stat"] = "SEARCHING";
+                            break;
+                        case static_cast<int>(rpi::NetworkRegStatus::REGISTRATION_DENIED):
+                            jpb["wireless"]["reg_stat"] = "REGISTRATION_DENIED";
+                            break;
+                        case static_cast<int>(rpi::NetworkRegStatus::REGISTERED_ROAMING):
+                            jpb["wireless"]["reg_stat"] = "REGISTERED_ROAMING";
+                            break;
+                        case static_cast<int>(rpi::NetworkRegStatus::LIMMITED):
+                            jpb["wireless"]["reg_stat"] = "LIMMITED";
+                            break;
+                        default:
+                            jpb["wireless"]["reg_stat"] = "UNKNOWN";
+                            break;
+                    }
+                }
+
+                const int thr = (rat == "NR5G") ? m_noNet5GThr : m_noNetLTEThr;
+                jpb["wireless"]["error_code"] = simFault
+                    ? "SIM_FAULT"
+                    : (cell_info.reg_stat == static_cast<int>(rpi::NetworkRegStatus::REGISTRATION_DENIED)
+                           ? "REGISTER_FAIL"
+                           : (thr > 0 && signalInfo.rsrp <= thr ? "WEAK_SIGNAL" : "NONE"));
+
+                netFault = cell_info.cell_id.empty() ||
+                           cell_info.reg_stat != static_cast<int>(rpi::NetworkRegStatus::REGISTERED_HOME) ||
+                           (rat == "LTE" && signalInfo.rsrp <= m_noNetLTEThr) ||
+                           (rat == "NR5G" && signalInfo.rsrp <= m_noNet5GThr);
+            }
+
+            // ---- diag 节点 ----
+            // 慢变字段：仅携带 30s 慢变 AT 查询结果，且仅在本周期刚刷新时携带 ----
+            // 内容 = 慢变批次查询到的注册三域（C5GREG?/CEREG?/CREG?）、拒绝原因码、
+            // PDP 承载（CGPADDR）、被拒时补查的 CEER 文本。QENG 的 3s 快变结果不进
+            // diag（已在 wireless 节点）；未刷新的周期不重复携带相同数据（省流量）。
+            // 快路径 QENG 只覆盖 signal/cell，不影响此处读取的 reg/bearer/ceer 缓存。
+            if (s_diagFresh && snapOk) {
+                s_diagFresh = false;
+                jpb["diag"]["reg_stat_ps"] = snap.reg.ps_stat;     // EPS 域（-1=查询失败）
+                jpb["diag"]["reg_stat_cs"] = snap.reg.cs_stat;     // CS 域（短信通道）
+                jpb["diag"]["reg_stat_5g"] = snap.reg.stat_5g;     // 5GS 域（SA 注册事实来源）
+                jpb["diag"]["reg_cause"] = snap.reg.reject_cause;   // 拒绝原因码（CEREG 第 6 段）
+                jpb["diag"]["pdp_active"] = snap.bearer.pdp_active; // PDP 持有有效 IP
+                jpb["diag"]["ue_ip"] = snap.bearer.ip;              // UE 侧 PDP 地址
+                if (!snap.ceer.empty()) {
+                    jpb["diag"]["ceer"] = snap.ceer;   // 被拒时补查的失败原因文本（AT+CEER）
                 }
             }
 
-            // 错误码：从预设集合随机选取，随 reg_stat 之后写入 wireless
-            jpb["wireless"]["error_code"] = pickWirelessErrorCode();
+            // ---- diag.urc：本周期（3s 窗口）内收到的 URC 原始行，拼接上传 ----
+            // 周期首取走并清空缓存（窗口=两次 drain 之间，≈3s）；无 URC 则不携带字段。
+            // 刷新拍与 urc 同帧共存；非刷新拍仅有 URC 时 diag 节点只含 urc
+            {
+                auto urcLines = module.atClient().drain_urc_log();
+                if (!urcLines.empty()) {
+                    std::string urcStr;
+                    for (size_t i = 0; i < urcLines.size(); ++i) {
+                        if (i > 0) urcStr += "\n";
+                        urcStr += urcLines[i];
+                    }
+                    jpb["diag"]["urc"] = urcStr;
+                }
+            }
 
             std::string apn;
             module.getAPN(0, 1, apn);
-            // std::cout << "APN1: " << apn << std::endl;
             if (m_collectCategory == CollectFull) {
                 jpb["wireless"]["apn"] = apn;
             }
 
-            auto zdpb_str = jpb.dump();
-            LogDebug << "jpb: " << zdpb_str;
-            //fault handle
-            // LogDebug << "cell_info.reg_stat: " << cell_info.reg_stat;
-            if (simInfo.status == rpi::SimStatus::ABSENT || simInfo.status == rpi::SimStatus::LOCKED) {
-                //保存故障信息
+            // ---- 故障落盘（判定布尔先算好，dump 后不再改判）----
+            std::string zdpb_str;
+            if (simFault) {
+                zdpb_str = jpb.dump();
                 saveFault(FAULT_FILE_SIM, zdpb_str);
                 LogInfo << "ProbeMgrP::saveSimFault\n";
-
-            } else if (cell_info.cell_id.empty() ||
-                       cell_info.reg_stat != static_cast<int>(rpi::NetworkRegStatus::REGISTERED_HOME) ||
-                       ((signalInfo.technology == "LTE") && (signalInfo.rsrp <= m_noNetLTEThr)) ||
-                       ((signalInfo.technology == "NR") && (signalInfo.rsrp <= m_noNet5GThr))) {
-                //保存故障信息
+            } else if (netFault) {
+                zdpb_str = jpb.dump();
                 saveFault(FAULT_FILE_NET, zdpb_str);
                 LogInfo << "ProbeMgrP::saveNetFault\n";
-            } //else {//正常
+            } else {
+                zdpb_str = jpb.dump();
+            }
+            LogDebug << "jpb: " << zdpb_str;
             //just for test MQTT: GYK
             if(1){
                 //如果fault存在，读取fault，并发送fault
@@ -402,6 +604,51 @@ namespace cmsr {
                 ProbeMgr::getInstance().publishData(zdpb_str);
                 LogInfo << "ProbeMgrP::mqtt.messageSend topic:" << TOPIC_DVICE_VW_DATA_UP;
             }
+
+            // ==================== [临时测试代码] 模组软重启验证（宏开关，默认关闭） ====================
+            // 每 40s 做一次射频软开关循环：AT+CFUN=0 → 随机停 800~1500ms → AT+CFUN=1。
+            // 验证 CFUN/CSCON/rrcstate/CEREG URC 流与采集链路掉网-恢复行为。
+            // 打开方式（二选一）：
+            //   1. cmake -DVWISE_TEST_MODULE_RESET=ON（build_rpi.sh 环境变量同名透传）
+            //   2. 临时把下方宏定义改为 1
+            // 预期日志序列（每轮）：
+            //   [TEST] AT+CFUN=0 (radio off, then wait NNNms)
+            //   +CFUN: 0 / +CSCON: 0 / +QIND: "rrcstate",0 / +CEREG stat 掉网 URC
+            //   [TEST] AT+CFUN=1 (radio on)
+            //   +CFUN: 1 → 驱动 emit ModuleBoot（[DiagEvent] module_boot）
+            //   重新驻网 10~30s：QENG/CEREG 查询失真属预期——快查失败保留上次值并
+            //   置 s_lastSlowAtMs=0，慢变刷新逐周期重试直至恢复
+            // 注意：
+            //   1) 两命令+等待在独立线程执行（最长阻塞 ~3.5s），不卡采集周期；
+            //      AT 通道经 cmd_serial_cv_ 与周期查询串行，无并发写
+            //   2) CFUN=0/1 不重启模组（无 RDY），仅射频下电-上电
+            //   3) 每周期 drain 的 diag.urc 会把掉网窗口内的 URC 原始行随消息上送
+#ifndef VWISE_TEST_MODULE_RESET
+#define VWISE_TEST_MODULE_RESET 0
+#endif
+#if VWISE_TEST_MODULE_RESET
+            {
+                static int64_t lastCfunMs = 0;
+                const int64_t now = base_tools::BaseTimer::GetMilliTime();
+                if (lastCfunMs == 0) {
+                    lastCfunMs = now;   // 首轮：SDK 启动 40s 后才触发
+                } else if (now - lastCfunMs >= 40000) {
+                    lastCfunMs = now;
+                    std::thread([] {
+                        auto &at = rpi::RPIModuleInterface::getInstance().atClient();
+                        if (!at.is_connected()) return;
+                        static thread_local std::mt19937 gen(std::random_device{}());
+                        const int waitMs = std::uniform_int_distribution<int>(800, 1500)(gen);
+                        LogInfo << "[TEST] AT+CFUN=0 (radio off, then wait " << waitMs << "ms)";
+                        at.command("AT+CFUN=0", std::chrono::milliseconds(2000));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                        LogInfo << "[TEST] AT+CFUN=1 (radio on)";
+                        at.command("AT+CFUN=1", std::chrono::milliseconds(2000));
+                    }).detach();
+                }
+            }
+#endif
+            // ==================== [临时测试代码] 结束 ====================
         }
 
         // 周期采集数据上报（带断连缓存）

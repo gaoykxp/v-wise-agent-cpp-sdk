@@ -32,9 +32,38 @@ include_directories(
         basetools
         common
         boards/rpi
+        src/modem
         third_party/mqtt/include
         third_party/mqtt/src
 )
+
+# ==================== 模组驱动选择（编译期绑定） ====================
+# 方案见《SDK多模组兼容设计-编译选项方案.md》：
+#   CMake 选项 VWISE_MODEM → 编译定义 VWISE_MODEM_DRIVER_* → src/modem/modem_registry.cpp
+#   选择方言层驱动；业务层一律经 vwise::modem::modemDriver() 访问。
+# 新增模组：drivers/<vendor>/<model>/ 实现驱动 → registry 加 #elif → 此处加映射。
+set(VWISE_MODEM "quectel_5g" CACHE STRING "蜂窝模组驱动（方言层）：quectel_5g | stub")
+message(STATUS "VWISE_MODEM = ${VWISE_MODEM}")
+
+set(MODEM_DRIVER_SRCS "")
+if(VWISE_MODEM STREQUAL "quectel_5g")
+    set(VWISE_MODEM_DRIVER_DEF VWISE_MODEM_DRIVER_QUECTEL_5G)
+    list(APPEND MODEM_DRIVER_SRCS
+            ${PROJECT_SOURCE_DIR}/src/modem/drivers/quectel_5g/quectel_5g_driver.cpp)
+elseif(VWISE_MODEM STREQUAL "stub")
+    # 无模组环境/单元测试：空驱动（全部能力缺失，语义层自然降级）
+    set(VWISE_MODEM_DRIVER_DEF VWISE_MODEM_STUB)
+else()
+    message(FATAL_ERROR "未知模组驱动 VWISE_MODEM=${VWISE_MODEM}（支持：quectel_5g | stub）")
+endif()
+add_definitions(-D${VWISE_MODEM_DRIVER_DEF})
+
+# [临时测试] 模组软重启验证开关（probe_mgr.cpp 尾部 AT+CFUN=0/1 循环），默认关闭。
+# 打开：cmake -DVWISE_TEST_MODULE_RESET=ON（build_rpi.sh 环境变量同名透传）
+option(VWISE_TEST_MODULE_RESET "模组软重启验证临时代码（默认关闭）" OFF)
+if(VWISE_TEST_MODULE_RESET)
+    add_definitions(-DVWISE_TEST_MODULE_RESET=1)
+endif()
 
 # 从 project VERSION 生成版本号头文件（版本号单一来源：上面的 project(... VERSION x.y.z)）
 configure_file(
@@ -84,6 +113,13 @@ set(STUB_SRCS
 aux_source_directory(${PROJECT_SOURCE_DIR}/src SRCS)
 aux_source_directory(${PROJECT_SOURCE_DIR}/common COMMON_SRCS)
 
+# 模组方言层（aux_source_directory 非递归，src/modem 单独收录）
+set(MODEM_SRCS
+        ${PROJECT_SOURCE_DIR}/src/modem/diag_event_bus.cpp
+        ${PROJECT_SOURCE_DIR}/src/modem/modem_registry.cpp
+        ${MODEM_DRIVER_SRCS}
+)
+
 # Remove original files that were replaced by stubs
 list(REMOVE_ITEM SRCS
     "${PROJECT_SOURCE_DIR}/src/zd_wrapper.cpp"
@@ -92,7 +128,7 @@ list(REMOVE_ITEM SRCS
     "${PROJECT_SOURCE_DIR}/src/minio.cpp"
 )
 
-add_executable(${PROJECT_NAME} ${SRCS} ${COMMON_SRCS} ${STUB_SRCS})
+add_executable(${PROJECT_NAME} ${SRCS} ${COMMON_SRCS} ${MODEM_SRCS} ${STUB_SRCS})
 
 link_directories(${CMAKE_CURRENT_SOURCE_DIR}/output)
 

@@ -68,7 +68,7 @@ namespace rpi {
                 // ---- URC setup ----
                 // 注册 URC handler（仅打印）。RM520N-GL 状态 URC 一并注册：
                 // +QUSIM/+QIND/+CSCON/+CGEV/+CTZV/+CTZE/+CNEC，以及与 AT 查询响应前缀
-                // 冲突的注册类 +QUIMSLOT/+CEREG/+CREG/+Q5GREG/+QSIMSTAT。
+                // 冲突的注册类 +QUIMSLOT/+CEREG/+CREG/+C5GREG/+Q5GREG/+QSIMSTAT。
                 // 冲突类由 reader_loop 的 isCollidingResponseLine 命令感知判定安全处理：
                 // 执行同族查询时当响应缓冲、否则当 URC 派发，不会吞掉查询结果。
                 m_atClient.register_urc_handler("RDY", [](const std::string& l) {
@@ -90,6 +90,7 @@ namespace rpi {
                 m_atClient.register_urc_handler("+QIND:", [](const std::string& l) {
                     LogInfo <<"[RPi] URC indication: " << l ;
                 });
+                // +CSCON: 0=RRC 空闲（对应 ue_state NOCONN），1=RRC 已建立（CONNECTED）
                 m_atClient.register_urc_handler("+CSCON:", [](const std::string& l) {
                     LogInfo <<"[RPi] URC RRC state: " << l ;
                 });
@@ -117,23 +118,29 @@ namespace rpi {
                 m_atClient.register_urc_handler("+CREG:", [](const std::string& l) {
                     LogInfo <<"[RPi] URC GSM reg: " << l ;
                 });
+                m_atClient.register_urc_handler("+C5GREG:", [](const std::string& l) {
+                    LogInfo <<"[RPi] URC 5GS reg: " << l ;
+                });
                 m_atClient.register_urc_handler("+Q5GREG:", [](const std::string& l) {
                     LogInfo <<"[RPi] URC 5G reg: " << l ;
                 });
 
-                // Enable selected unsolicited reports (ignore failures: not all
-                // modules support every command).
+                // ---- URC 使能序列（失败忽略：部分模组不支持个别指令）----
+                // ATE0 已由 AtClient::connect() 首条下发。CEREG/C5GREG n=3：
+                // URC 带位置 + EMM 拒绝原因（stat=3 时尾随 cause_type/reject_cause，
+                // 注册被拒证据随事件直达，无需轮询）。rrcstate 经 +QIND: "rrcstate" 上报。
                 const auto to = std::chrono::milliseconds(1500);
-                m_atClient.command("AT+QSIMSTAT=1", to);   // SIM hot-plug URC
-                m_atClient.command("AT+CNMI=2,1,0,0,0", to); // SMS arrival URC
-                m_atClient.command("AT+CSCON=1", to);    // RRC 连接态 URC
-                m_atClient.command("AT+QINDCSQ=1", to);  // +QIND "csq" 信号 URC
-                m_atClient.command("AT+CGEREP=1", to);   // PDP 上下文事件 URC
-                m_atClient.command("AT+CTZR=1", to);     // 时区 URC (+CTZE)
-                m_atClient.command("AT+CNEC=1", to);     // 网络错误码 URC
-                m_atClient.command("AT+CEREG=2", to);    // EPS 注册 URC(带位置)
-                m_atClient.command("AT+CREG=2", to);     // GSM 注册 URC(带位置)
-                m_atClient.command("AT+Q5GREG=1", to);   // 5G 注册 URC(Quectel)
+                m_atClient.command("AT+CMEE=2", to);       // 错误报告 verbose（AtResponse.err 依赖）
+                m_atClient.command("AT+QSIMSTAT=1", to);   // SIM 热插拔 URC
+                m_atClient.command("AT+CNMI=2,1,0,0,0", to); // 短信到达 URC
+                m_atClient.command("AT+CGEREP=1", to);     // PDP 上下文事件 URC
+                m_atClient.command("AT+CTZR=1", to);       // 时区 URC (+CTZE)
+                m_atClient.command("AT+CEREG=3", to);      // EPS 注册 URC（带位置+拒绝原因）
+                m_atClient.command("AT+CREG=2", to);       // CS 注册 URC（带位置）
+                m_atClient.command("AT+C5GREG=3", to);     // 5GS 注册 URC（带位置+拒绝原因）
+                m_atClient.command("AT+QINDCFG=\"rrcstate\",1", to); // RRC 状态 URC
+                m_atClient.command("AT+CSCON=1", to);     // RRC 连接态 URC（+CSCON:0=空闲 NOCONN，1=已建立 CONNECTED）
+                m_atClient.command("AT+QNETDEVSTATUS=1", to); // RmNet 链路状态 URC（方言层驱动消费）
                 LogInfo <<"[RPi] URC framework enabled" ;
 
                 // Check dual SIM support

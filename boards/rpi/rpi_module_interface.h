@@ -101,6 +101,11 @@ namespace rpi {
         // Set AT command port (e.g., "/dev/ttyUSB2")
         void setAtPort(const std::string& port, int baud_rate = 115200);
 
+        // 底层 AT 通道访问器：供方言层驱动（vwise::modem）经 rpi_at_channel_adapter
+        // 绑定到同一条串口命令通道。init() 之后调用才有意义。
+        tbox::AtClient& atClient() { return m_atClient; }
+        bool isInitialized() const { return m_initialized; }
+
         // ============== Single SIM Methods (sim_id: 0 or 1) ==============
         NetworkServiceStatus getNetworkServiceStatus(int sim_id);
         bool getNetworkSignalInfo(int sim_id, NetworkSignalInfo& signal_info);

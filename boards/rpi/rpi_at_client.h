@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +19,8 @@ namespace tbox {
 struct AtResponse {
     bool ok{false};
     std::vector<std::string> lines; // trimmed data lines (echo/URC/final result excluded)
+    std::string err;                // 非OK终行原文（"ERROR" / "+CME ERROR: <verbose>" / "+CMS ERROR: ..."），
+                                    // 需模组已使能 AT+CMEE=2 才有 verbose 文本
 };
 
 struct GpsLocation {
@@ -138,6 +141,11 @@ public:
     void register_urc_handler(const std::string& prefix, UrcCallback cb);
     void unregister_urc_handler(const std::string& prefix);
 
+    // 取走自上次调用以来收到的 URC 原始行（时间序）并清空缓存。
+    // 采集周期调用一次（3s），拼接送 payload["diag"]["urc"]；
+    // 被发往 handler 之前的原始行，与 handler 是否处理无关
+    std::vector<std::string> drain_urc_log();
+
     // ============== Basic Queries ==============
     std::optional<std::string> get_imei();
     std::optional<std::string> get_imsi();
@@ -231,6 +239,7 @@ private:
         std::vector<std::string> lines;
         bool done{false};
         bool ok{false};
+        std::string err;   // 非OK终行原文（CMEE verbose 错误文本）
         std::condition_variable cv;
     };
 
@@ -242,6 +251,11 @@ private:
     bool                       shutting_down_{false};
     LineAccumulator            acc_;            // raw bytes -> trimmed lines
     UrcDispatcher              urc_;
+    // URC 原始行缓存（diag.urc 上报用）：reader_loop 在派发前追加，
+    // drain_urc_log() 取走。上限 kUrcLogCap 行，超限丢最旧（防周期停摆时无界增长）
+    static constexpr size_t    kUrcLogCap = 100;
+    mutable std::mutex         urc_log_mtx_;
+    std::deque<std::string>    urc_log_;
     std::thread                reader_;
     std::atomic<bool>          reading_{false};
 
