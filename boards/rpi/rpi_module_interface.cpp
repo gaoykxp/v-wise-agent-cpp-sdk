@@ -126,21 +126,20 @@ namespace rpi {
                 });
 
                 // ---- URC 使能序列（失败忽略：部分模组不支持个别指令）----
-                // ATE0 已由 AtClient::connect() 首条下发。CEREG/C5GREG n=3：
-                // URC 带位置 + EMM 拒绝原因（stat=3 时尾随 cause_type/reject_cause，
-                // 注册被拒证据随事件直达，无需轮询）。rrcstate 经 +QIND: "rrcstate" 上报。
+                // ATE0 已由 AtClient::connect() 首条下发。
+                // CEREG/C5GREG 用 n=2（带位置）：实测固件不支持 n=3（拒绝原因随查询取，
+                // URC 不带）；rrcstate 用标准 +CSCON（Quectel QINDCFG rrcstate 已废弃不用）
                 const auto to = std::chrono::milliseconds(1500);
-                m_atClient.command("AT+CMEE=2", to);       // 错误报告 verbose（AtResponse.err 依赖）
-                m_atClient.command("AT+QSIMSTAT=1", to);   // SIM 热插拔 URC
-                m_atClient.command("AT+CNMI=2,1,0,0,0", to); // 短信到达 URC
-                m_atClient.command("AT+CGEREP=1", to);     // PDP 上下文事件 URC
-                m_atClient.command("AT+CTZR=1", to);       // 时区 URC (+CTZE)
-                m_atClient.command("AT+CEREG=3", to);      // EPS 注册 URC（带位置+拒绝原因）
-                m_atClient.command("AT+CREG=2", to);       // CS 注册 URC（带位置）
-                m_atClient.command("AT+C5GREG=3", to);     // 5GS 注册 URC（带位置+拒绝原因）
-                m_atClient.command("AT+QINDCFG=\"rrcstate\",1", to); // RRC 状态 URC
-                m_atClient.command("AT+CSCON=1", to);     // RRC 连接态 URC（+CSCON:0=空闲 NOCONN，1=已建立 CONNECTED）
-                m_atClient.command("AT+QNETDEVSTATUS=1", to); // RmNet 链路状态 URC（方言层驱动消费）
+                m_atClient.command("AT+QSIMSTAT=1", to);   // SIM 插拔 URC
+                m_atClient.command("AT+CNMI=2,1,0,0,0", to); // 短信 URC（兼容保留，业务不解析）
+                m_atClient.command("AT+CGEREP=1", to);     // PDU 会话激活/释放 URC (+CGEV)
+                m_atClient.command("AT+CTZR=1", to);       // 时区 URC (+CTZV)
+                m_atClient.command("AT+CEREG=2", to);      // EPS/EMM 注册 URC（带位置）
+                m_atClient.command("AT+CREG=2", to);       // 2G CS 域注册 URC（带位置）
+                m_atClient.command("AT+C5GREG=2", to);     // 5GS 5G-SA 注册 URC（带位置）
+                m_atClient.command("AT+CSCON=1", to);      // 标准 RRC 状态 URC（+CSCON）
+                m_atClient.command("AT+QNETDEVSTATUS=1", to); // RmNet 网卡 PDU/IP 状态 URC（方言层驱动消费）
+                m_atClient.command("AT+CMEE=2", to);       // CME/CMS 错误返回文本，排障必备
                 LogInfo <<"[RPi] URC framework enabled" ;
 
                 // Check dual SIM support

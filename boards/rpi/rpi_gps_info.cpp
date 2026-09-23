@@ -88,17 +88,17 @@ namespace cmsr
                     }
                     else
                     {
-                        // [临时] GPS 无法从模组获取时，使用固定坐标兜底（上海一带 31.247656, 121.612243）
+                        // AT 取不到 GNSS 时置无效值（0,0，valid=false），
+                        // 上报侧看到 0,0 即可判定本周期无有效定位，绝不伪造坐标。
                         {
                             std::lock_guard<std::mutex> lock(mutex_);
-                            gData.latitude = 31.247656;
-                            gData.longitude = 121.612243;
-                            gData.valid = true;
+                            gData = GPSData{};
+                            gData.valid = false;
                         }
                         failCount++;
                         if (failCount % 10 == 0)
                         {
-                            LogWarn << "[GPS] no fix, failCount=" << failCount << " (using fallback coords)";
+                            LogWarn << "[GPS] no fix, failCount=" << failCount << " (reporting 0,0 invalid)";
                         }
                         // 冷启动阶段（从未定位成功）持续失败 -> 周期性重开 GNSS
                         if (!everFixed && failCount % 20 == 0)

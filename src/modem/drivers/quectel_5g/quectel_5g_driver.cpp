@@ -100,15 +100,13 @@ bool Quectel5GDriver::init(IAtChannel& ch) {
     ch_ = &ch;
 
     // ---- 使能（与 RPIModuleInterface::init 启动序列幂等，重复下发无害）----
-    ch_->command("AT+CMEE=2", 1500);          // 错误报告 verbose：裸 ERROR → +CME ERROR: <text>（§2.23）
-    // CEREG/C5GREG n=3：URC 带位置 + EMM 拒绝原因（stat=3 时尾随 <cause_type>,<reject_cause>，
-    // §5.5）。老固件不支持 n=3 时降级 n=2（仅位置）
-    if (!ch_->command("AT+CEREG=3", 1500).ok)
-        ch_->command("AT+CEREG=2", 1500);
-    if (!ch_->command("AT+C5GREG=3", 1500).ok)
-        ch_->command("AT+C5GREG=2", 1500);
-    ch_->command("AT+CGEREP=1", 1500);        // PDP 事件 URC（§9.7，与启动序列同值）
+    ch_->command("AT+QSIMSTAT=1", 1500);      // SIM 插拔 URC
+    ch_->command("AT+CGEREP=1", 1500);        // PDU 会话事件 URC（§9.7，与启动序列同值）
+    ch_->command("AT+CEREG=2", 1500);         // EPS 注册 URC 带位置（§5.x；实测固件不支持 n=3）
+    ch_->command("AT+C5GREG=2", 1500);        // 5GS 注册 URC 带位置（§5.5；实测固件不支持 n=3）
+    ch_->command("AT+CSCON=1", 1500);         // 标准 RRC 状态 URC（+CSCON）
     ch_->command("AT+QNETDEVSTATUS=1", 1500); // 主机侧 RmNet 链路状态 URC（§9.11）
+    ch_->command("AT+CMEE=2", 1500);          // 错误报告 verbose：裸 ERROR → +CME ERROR: <text>（§2.23）
 
     registerUrcHandlers();
     LogInfo << "[Quectel5G] driver initialized";
@@ -329,11 +327,19 @@ bool Quectel5GDriver::getDiagSnapshot(DiagSnapshot& out) {
     queryServing(out.signal, out.cell);
     queryBearer(out.bearer);
 
-    // 注册被拒时补查 AT+CEER（最近一次失败操作的释放原因文本，§3.2/原因表 §12.9）。
+    // 补查 AT+CEER（最近一次失败操作的释放原因文本，§3.2/原因表 §12.9）：
+    //   1) 任一注册域被拒（stat=3）——注册失败原因
+    //   2) 已注册但承载不通——PDP 激活被拒的原因（regular deactivation /
+    //      insufficient resources / missing-or-unknown-APN 等）
+    // 用 ueRegistered()（注册事实）而非 effective_registered：后者会被
+    // quirk_pdp_implies_registered 反过来用 bearer 纠偏，此处用会循环依赖。
     // 仅本函数（30s 慢变批次）执行，不占 3s 周期；CEER 只保留最近一次失败原因，
     // 被拒为瞬时态时文本可能已被后续操作覆盖——仅作参考证据，与 reg 拒绝码互不覆盖。
-    if (profile().has_ceer &&
-        (out.reg.ps_stat == 3 || out.reg.cs_stat == 3 || out.reg.stat_5g == 3)) {
+    // 若模组从未尝试 PDP 激活，CEER 返回空或 no error，采不到属正常。
+    const bool regDenied =
+        out.reg.ps_stat == 3 || out.reg.cs_stat == 3 || out.reg.stat_5g == 3;
+    const bool regOkNoBearer = out.reg.ueRegistered() && !out.bearer.pdp_active;
+    if (profile().has_ceer && (regDenied || regOkNoBearer)) {
         std::string text;
         if (getExtendedError(text)) out.ceer = text;
     }
@@ -407,7 +413,7 @@ void Quectel5GDriver::onRegUrc(const std::string& line, const char* /*domainHint
     else if (startsWith(line, "+Q5GREG:")) prefix = "+Q5GREG:";
     auto parts = splitCsv(line.substr(std::string(prefix).size()));
     if (!parts.empty()) parseInt(parts[0], stat);
-    if (stat == 3) emit(DiagEvent::NetDenied, line);   // 注册被拒；n=3 时 URC 尾随 <cause_type>,<reject_cause>，原始行保留证据
+    if (stat == 3) emit(DiagEvent::NetDenied, line);   // 注册被拒；n=2 URC 不带原因码，拒绝原因由慢变批次 CEREG? 查询补齐（parseRegLine）
     else LogInfo << "[Quectel5G] URC " << prefix << " " << line;
 }
 

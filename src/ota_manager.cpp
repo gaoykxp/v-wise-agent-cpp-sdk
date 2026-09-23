@@ -92,9 +92,12 @@ namespace cmsr {
 
         void OtaManager::otaWorker(std::string taskId, std::string version,
                                    std::string url, std::string sha256, int64_t size) {
-            std::string dlPath = m_workDir + "/update.bin";
+            // OTA 包形态：xxx.tar.gz。下载原样保存（不改名 update.bin），
+            // 解压提取其中的 firmware.bin 作为新固件本体，hash 校验对象 = firmware.bin
+            std::string dlPath = m_workDir + "/update.tar.gz";
+            std::string fwPath = m_workDir + "/firmware.bin";
 
-            // 磁盘空间检查
+            // 磁盘空间检查（tar.gz + 解压出的 firmware.bin ≈ 2 份固件体积）
             if (size > 0) {
                 struct statvfs vfs;
                 if (statvfs(m_workDir.c_str(), &vfs) == 0) {
@@ -110,7 +113,7 @@ namespace cmsr {
             reportStatus(taskId, "accepted", version);
             reportStatus(taskId, "downloading", version);
 
-            // 1. 下载
+            // 1. 下载 tar.gz
             if (!downloadFile(url, dlPath)) {
                 reportStatus(taskId, "failed", version, "download error");
                 std::remove(dlPath.c_str());
@@ -118,27 +121,56 @@ namespace cmsr {
                 return;
             }
 
-            // 2. SHA-256 校验
-            std::string actual = sha256File(dlPath);
+            // 2. 解压提取 firmware.bin（hash 校验与安装的对象）
+            if (!extractFirmware(dlPath, fwPath)) {
+                reportStatus(taskId, "failed", version,
+                             "extract firmware.bin failed (not tar.gz or member missing)");
+                std::remove(dlPath.c_str());
+                std::remove(fwPath.c_str());
+                m_running = false;
+                return;
+            }
+
+            // 3. SHA-256 校验（对提取出的 firmware.bin）
+            std::string actual = sha256File(fwPath);
             if (actual.empty() || !iequals(actual, sha256)) {
+                // [临时测试] 校验失败保留固件包（VWISE_TEST_OTA_KEEP_FILE，当前已打开）：
+                // tar.gz 与解压出的 firmware.bin 均改名 .fail_<毫秒时间戳> 保留在原目录，
+                // 不覆盖历史失败样本，便于离线 sha256sum/比对（定位包内容/下载错误页等问题）。
+#ifndef VWISE_TEST_OTA_KEEP_FILE
+#define VWISE_TEST_OTA_KEEP_FILE 1
+#endif
+#if VWISE_TEST_OTA_KEEP_FILE
+                struct stat st;
+                const off_t fwSize = (stat(fwPath.c_str(), &st) == 0) ? st.st_size : -1;
+                const std::string ts = std::to_string(base_tools::BaseTimer::GetMilliTime());
+                std::rename(fwPath.c_str(), (fwPath + ".fail_" + ts).c_str());
+                std::rename(dlPath.c_str(), (dlPath + ".fail_" + ts).c_str());
+                LogWarn << "[OTA test] verify failed, files kept: " << fwPath << ".fail_" << ts
+                        << " (size=" << fwSize << ", expected size=" << size << ") and "
+                        << dlPath << ".fail_" << ts;
+#else
+                std::remove(dlPath.c_str());
+                std::remove(fwPath.c_str());
+#endif
                 reportStatus(taskId, "verify_failed", version,
                              "expected=" + sha256 + " got=" + actual);
-                std::remove(dlPath.c_str());
                 m_running = false;
                 return;
             }
             LogInfo << "OTA verify ok, sha256=" << actual;
 
-            // 3. 安装
+            // 4. 安装（firmware.bin → 备份+原子替换 exe）
             reportStatus(taskId, "installing", version);
             if (!installBinary()) {
                 reportStatus(taskId, "failed", version, "install error");
                 std::remove(dlPath.c_str());
+                std::remove(fwPath.c_str());
                 m_running = false;
                 return;
             }
 
-            // 4. 写 pending 标志（待重启后提交/回滚）
+            // 5. 写 pending 标志（待重启后提交/回滚）
             {
                 json pj;
                 pj["task_id"] = taskId;
@@ -159,6 +191,22 @@ namespace cmsr {
         bool OtaManager::downloadFile(const std::string& url, const std::string& path) {
             std::vector<std::string> headers;
             return base_tools::CHttpClient::getInstance().HTCLDownloadFile(url, path, headers, nullptr);
+        }
+
+        // 从 tar.gz OTA 包中提取 firmware.bin（只解该成员，不解出包内其它文件）
+        // 兼容两种打包形态的成员名："firmware.bin" 与 "./firmware.bin"
+        bool OtaManager::extractFirmware(const std::string& tarPath, const std::string& outPath) {
+            const char* memberNames[] = {"firmware.bin", "./firmware.bin"};
+            for (const char* name : memberNames) {
+                std::string cmd = "tar -xzf '" + tarPath + "' -C '" + m_workDir +
+                                  "' '" + name + "' 2>/dev/null";
+                if (std::system(cmd.c_str()) == 0 && access(outPath.c_str(), F_OK) == 0) {
+                    LogInfo << "OTA extract ok: " << name << " from " << tarPath;
+                    return true;
+                }
+            }
+            LogError << "OTA extract failed: no firmware.bin in " << tarPath;
+            return false;
         }
 
         std::string OtaManager::sha256File(const std::string& path) {
@@ -194,7 +242,7 @@ namespace cmsr {
         }
 
         bool OtaManager::installBinary() {
-            std::string srcPath = m_workDir + "/update.bin";
+            std::string srcPath = m_workDir + "/firmware.bin";   // tar.gz 中提取出的新固件
             std::string tmpPath = m_exePath + ".new.tmp";   // 目标文件系统临时文件（保证 rename 原子）
             std::string bakPath = m_exePath + ".bak";
 
@@ -229,21 +277,29 @@ namespace cmsr {
             }
             chmod(m_exePath.c_str(), 0755);
 
-            // 4. 清理下载临时
+            // 4. 清理下载包与提取物
             std::remove(srcPath.c_str());
+            std::remove((m_workDir + "/update.tar.gz").c_str());
             LogInfo << "OTA install ok: " << m_exePath << " replaced";
             return true;
         }
 
         void OtaManager::reportStatus(const std::string& taskId, const std::string& status,
                                       const std::string& version, const std::string& extra) {
-            json j;
+            // 回执格式（OrderDownAck 通道）：status/detail/version/imei 收敛到 result 节点
+            // status: accepted / downloading / installing / success / verify_failed / failed
+            json j, jResult;
             j["cmd_type"] = "ota_upgrade";
             j["task_id"] = taskId;
-            j["status"] = status;
-            j["version"] = version;
-            if (!extra.empty()) j["detail"] = extra;
+            jResult["status"] = status;
+            if (!extra.empty()) jResult["detail"] = extra;
+            jResult["version"] = version;
+            jResult["imei"] = ProbeMgr::getInstance().m_imei;
+            j["result"] = jResult;
             std::string payload = j.dump();
+            // OTA 回执全文打印（journal/日志文件可见），便于现场核对平台侧收到的内容
+            LogInfo << "[OTA report] topic=" << ProbeMgr::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK
+                    << ", payload=" << payload;
             ProbeMgr::getInstance().mqtt.messageSend(
                 ProbeMgr::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK, payload);
         }

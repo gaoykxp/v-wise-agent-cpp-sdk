@@ -607,13 +607,13 @@ namespace cmsr {
 
             // ==================== [临时测试代码] 模组软重启验证（宏开关，默认关闭） ====================
             // 每 40s 做一次射频软开关循环：AT+CFUN=0 → 随机停 800~1500ms → AT+CFUN=1。
-            // 验证 CFUN/CSCON/rrcstate/CEREG URC 流与采集链路掉网-恢复行为。
+            // 验证 CFUN/CSCON/CEREG URC 流与采集链路掉网-恢复行为。
             // 打开方式（二选一）：
             //   1. cmake -DVWISE_TEST_MODULE_RESET=ON（build_rpi.sh 环境变量同名透传）
             //   2. 临时把下方宏定义改为 1
             // 预期日志序列（每轮）：
             //   [TEST] AT+CFUN=0 (radio off, then wait NNNms)
-            //   +CFUN: 0 / +CSCON: 0 / +QIND: "rrcstate",0 / +CEREG stat 掉网 URC
+            //   +CFUN: 0 / +CSCON: 0 / +CEREG stat 掉网 URC
             //   [TEST] AT+CFUN=1 (radio on)
             //   +CFUN: 1 → 驱动 emit ModuleBoot（[DiagEvent] module_boot）
             //   重新驻网 10~30s：QENG/CEREG 查询失真属预期——快查失败保留上次值并

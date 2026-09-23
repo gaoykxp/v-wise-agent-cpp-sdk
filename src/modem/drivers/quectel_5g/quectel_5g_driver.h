@@ -22,9 +22,8 @@ class Quectel5GDriver final : public IModemDriver {
 public:
     const ModemProfile& profile() const override;
 
-    // 绑定 AT 通道；使能 CMEE=2 / CEREG=3 / C5GREG=3 / CGEREP=1 / QNETDEVSTATUS=1
-    // 并注册 URC 处理器（与 RPIModuleInterface::init 的启动序列幂等，重复下发无害；
-    // CEREG/C5GREG n=3 不被老固件支持时降级 n=2）
+    // 绑定 AT 通道；使能 QSIMSTAT/CGEREP/CEREG/C5GREG(n=2)/CSCON/QNETDEVSTATUS/CMEE
+    // 并注册 URC 处理器（与 RPIModuleInterface::init 的启动序列幂等，重复下发无害）
     bool init(IAtChannel& ch) override;
 
     bool getDiagSnapshot(DiagSnapshot& out) override;
