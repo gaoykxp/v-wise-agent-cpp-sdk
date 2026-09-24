@@ -4,7 +4,7 @@
 **********************************************************************************************************************/
 
 #include "ota_manager.h"
-#include "probe_mgr.h"
+#include "probe_manager.h"
 #include "global.h"
 #include "httpclient.h"
 #include "log.h"
@@ -37,6 +37,10 @@ namespace {
         }
         return true;
     }
+
+    // m_running 残留锁看门狗超时：指令到达起算超过 2 分钟仍 running
+    // → 判定工作线程挂死（典型：curl 无总超时、传输中途停滞），自动复位放行新指令
+    constexpr int64_t kOtaWatchdogMs = 120 * 1000;
 }
 
 namespace cmsr {
@@ -70,10 +74,23 @@ namespace cmsr {
         }
 
         void OtaManager::handleOtaCommand(const json& j) {
+            const int64_t nowMs = base_tools::BaseTimer::GetMilliTime();
             if (m_running.exchange(true)) {
-                LogWarn << "OTA already running, ignore new command";
-                return;
+                // 看门狗：m_running 为单向锁，工作线程若挂死将永久占用锁，
+                // 后续 OTA 指令全部被吞。超过 kOtaWatchdogMs 仍 running →
+                // 判定残留锁，接管放行本条指令；挂死的旧线程若日后苏醒，
+                // 会因代际号（m_workerGen）过期在关键节点自行退出。
+                const int64_t heldMs = nowMs - m_runningSinceMs.load();
+                if (heldMs <= kOtaWatchdogMs) {
+                    LogWarn << "OTA already running, ignore new command";
+                    return;
+                }
+                LogWarn << "OTA watchdog: stale lock held " << heldMs / 1000
+                        << "s, takeover and accept new command";
             }
+            m_runningSinceMs.store(nowMs);
+            const uint32_t gen = ++m_workerGen;   // 无论后续走哪条分支，代际已翻页（旧线程失效）
+
             std::string taskId = j.value("task_id", "");
             std::string version = j.value("version", "");
             std::string url = j.value("url", "");
@@ -87,11 +104,24 @@ namespace cmsr {
             }
             LogInfo << "OTA command: task=" << taskId << ", version=" << version
                     << ", url=" << url << ", size=" << size;
-            std::thread(&OtaManager::otaWorker, this, taskId, version, url, sha256, size).detach();
+            std::thread(&OtaManager::otaWorker, this, gen, taskId, version, url, sha256, size).detach();
         }
 
-        void OtaManager::otaWorker(std::string taskId, std::string version,
+        void OtaManager::otaWorker(uint32_t gen, std::string taskId, std::string version,
                                    std::string url, std::string sha256, int64_t size) {
+            // 代际自检：看门狗接管后旧线程在关键节点发现自己过期则放弃（不清文件——
+            // 新线程会覆盖下载；不碰 m_running——锁已归新线程）
+            auto stale = [this, gen]() -> bool {
+                if (m_workerGen.load() != gen) {
+                    LogWarn << "OTA worker gen=" << gen << " superseded, abandon";
+                    return true;
+                }
+                return false;
+            };
+            // 释放锁：仅当代际仍有效时才复位 m_running（过期线程复位会误放新线程的锁）
+            auto releaseLock = [this, gen]() {
+                if (m_workerGen.load() == gen) m_running = false;
+            };
             // OTA 包形态：xxx.tar.gz。下载原样保存（不改名 update.bin），
             // 解压提取其中的 firmware.bin 作为新固件本体，hash 校验对象 = firmware.bin
             std::string dlPath = m_workDir + "/update.tar.gz";
@@ -104,7 +134,7 @@ namespace cmsr {
                     int64_t avail = (int64_t)vfs.f_bavail * vfs.f_frsize;
                     if (avail < size * 2) {
                         reportStatus(taskId, "failed", version, "insufficient disk space");
-                        m_running = false;
+                        releaseLock();
                         return;
                     }
                 }
@@ -117,9 +147,10 @@ namespace cmsr {
             if (!downloadFile(url, dlPath)) {
                 reportStatus(taskId, "failed", version, "download error");
                 std::remove(dlPath.c_str());
-                m_running = false;
+                releaseLock();
                 return;
             }
+            if (stale()) return;   // 下载耗时最长，挂死后被看门狗接管的旧线程最可能在此醒来
 
             // 2. 解压提取 firmware.bin（hash 校验与安装的对象）
             if (!extractFirmware(dlPath, fwPath)) {
@@ -127,9 +158,10 @@ namespace cmsr {
                              "extract firmware.bin failed (not tar.gz or member missing)");
                 std::remove(dlPath.c_str());
                 std::remove(fwPath.c_str());
-                m_running = false;
+                releaseLock();
                 return;
             }
+            if (stale()) return;
 
             // 3. SHA-256 校验（对提取出的 firmware.bin）
             std::string actual = sha256File(fwPath);
@@ -138,7 +170,7 @@ namespace cmsr {
                 // tar.gz 与解压出的 firmware.bin 均改名 .fail_<毫秒时间戳> 保留在原目录，
                 // 不覆盖历史失败样本，便于离线 sha256sum/比对（定位包内容/下载错误页等问题）。
 #ifndef VWISE_TEST_OTA_KEEP_FILE
-#define VWISE_TEST_OTA_KEEP_FILE 1
+#define VWISE_TEST_OTA_KEEP_FILE 0
 #endif
 #if VWISE_TEST_OTA_KEEP_FILE
                 struct stat st;
@@ -155,18 +187,24 @@ namespace cmsr {
 #endif
                 reportStatus(taskId, "verify_failed", version,
                              "expected=" + sha256 + " got=" + actual);
-                m_running = false;
+                releaseLock();
                 return;
             }
             LogInfo << "OTA verify ok, sha256=" << actual;
 
             // 4. 安装（firmware.bin → 备份+原子替换 exe）
+            // 安装前再查代际：过期线程绝不能碰 exe/pending（新线程才是当前执行者）
+            if (stale()) {
+                std::remove(dlPath.c_str());
+                std::remove(fwPath.c_str());
+                return;
+            }
             reportStatus(taskId, "installing", version);
             if (!installBinary()) {
                 reportStatus(taskId, "failed", version, "install error");
                 std::remove(dlPath.c_str());
                 std::remove(fwPath.c_str());
-                m_running = false;
+                releaseLock();
                 return;
             }
 
@@ -181,11 +219,11 @@ namespace cmsr {
                 if (ofs.is_open()) ofs << pj.dump();
             }
 
-            // 5. 重启
+            // 6. 重启
             reportStatus(taskId, "installing", version, "restarting");
             restartSelf();
             // 正常不会执行到这里
-            m_running = false;
+            releaseLock();
         }
 
         bool OtaManager::downloadFile(const std::string& url, const std::string& path) {

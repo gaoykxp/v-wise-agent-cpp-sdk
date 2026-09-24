@@ -58,7 +58,7 @@ else()
 endif()
 add_definitions(-D${VWISE_MODEM_DRIVER_DEF})
 
-# [临时测试] 模组软重启验证开关（probe_mgr.cpp 尾部 AT+CFUN=0/1 循环），默认关闭。
+# [临时测试] 模组软重启验证开关（probe_manager.cpp 尾部 AT+CFUN=0/1 循环），默认关闭。
 # 打开：cmake -DVWISE_TEST_MODULE_RESET=ON（build_rpi.sh 环境变量同名透传）
 option(VWISE_TEST_MODULE_RESET "模组软重启验证临时代码（默认关闭）" OFF)
 if(VWISE_TEST_MODULE_RESET)

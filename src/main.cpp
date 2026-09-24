@@ -8,7 +8,7 @@
 #include "global.h"
 #include "log.h"
 #include "ota_manager.h"
-#include "probe_mgr.h"
+#include "probe_manager.h"
 #include "rpi_gps_info.h"
 #include "rpi_module_interface.h"
 #include "rpi_serial_port.h"

@@ -1,12 +1,13 @@
 /**********************************************************************************************************************
-    > File Name: probe_mgr.cpp
+    > File Name: probe_manager.cpp
     > Author: hrliu dmhuang
     > Date: 12/20/23
 **********************************************************************************************************************/
 
-#include "probe_mgr.h"
+#include "probe_manager.h"
 #include "ota_manager.h"
 #include "base_timer.h"
+#include "cellular_diagnosis.h"   // error_code/reg_stat/ue_state 判定统一单元
 #include "rpi_gps_info.h"
 #include "global.h"
 #include "log.h"
@@ -29,8 +30,6 @@
 namespace {
     using namespace cmsr::vwise;
     using json = nlohmann::json;
-#define FAULT_FILE_SIM "faultSim"
-#define FAULT_FILE_NET "faultNet"
 
     // ==================== 模组驱动（方言层）懒初始化 ====================
     // RPIModuleInterface::init() 完成后首次采集时绑定 AT 通道并初始化驱动。
@@ -50,120 +49,11 @@ namespace {
         return ok;
     }
 
-    // QENG <state> → 字符串（驻网/注册/业务态，定界关键判据：
-    // LIMSRV=已驻留小区但未注册——指向 SIM/签约/网络侧而非模组硬件）
-    const char* ueStateName(vwise::modem::ServingCell::UeState s) {
-        switch (s) {
-            case vwise::modem::ServingCell::UeState::SEARCH:  return "SEARCH";
-            case vwise::modem::ServingCell::UeState::LIMSRV:  return "LIMSRV";
-            case vwise::modem::ServingCell::UeState::NOCONN:  return "NOCONN";
-            case vwise::modem::ServingCell::UeState::CONNECT: return "CONNECT";
-            default: return "UNKNOWN";
-        }
-    }
-
-    // 注册状态字符串（3GPP TS 27.007 stat 语义 + PDP 事实纠偏后的综合判定）
-    std::string regStatString(const vwise::modem::DiagSnapshot &snap) {
-        if (snap.reg.ps_stat == 3 || snap.reg.cs_stat == 3 || snap.reg.stat_5g == 3)
-            return "REGISTRATION_DENIED";
-        if (snap.effective_registered) {
-            if (snap.reg.ps_stat == 5 || snap.reg.stat_5g == 5) return "REGISTERED_ROAMING";
-            return "REGISTERED_HOME";
-        }
-        if (snap.reg.ps_stat == 2 || snap.reg.stat_5g == 2) return "SEARCHING";
-        return "NOT_REGISTERED";
-    }
-
-    // 无线错误码：按 DiagSnapshot 真实状态推导（SIM/注册被拒/弱信号），
-    // 供平台异常监测展示（替代旧的随机选取）
-    std::string deriveWirelessErrorCode(const rpi::SimInfo &simInfo,
-                                        const vwise::modem::DiagSnapshot &snap,
-                                        int lteThr, int nrThr) {
-        if (simInfo.status == rpi::SimStatus::ABSENT || simInfo.status == rpi::SimStatus::LOCKED) {
-            return "SIM_FAULT";
-        }
-        if (snap.reg.ps_stat == 3 || snap.reg.cs_stat == 3 || snap.reg.stat_5g == 3) {
-            return "REGISTER_FAIL";
-        }
-        if (snap.signal.valid && snap.signal.rsrp != -999) {
-            const int thr = (snap.signal.rat == "NR5G") ? nrThr : lteThr;
-            if (thr > 0 && snap.signal.rsrp <= thr) return "WEAK_SIGNAL";
-        }
-        return "NONE";
-    }
-
-    bool isFileExists(const std::string &filename) {
-        std::ifstream file(filename);
-        return file.good();
-    }
-    bool readFileLine(const std::string &filename, std::string &content) {
-        std::ifstream file(filename, std::ios::in);
-        if (!file.is_open()) {
-            std::cerr << "Error: Unable to open file '" << filename << "' for reading." << std::endl;
-            return false;
-        }
-
-        std::getline(file, content);
-
-        return true;
-    }
-
-    void saveFault(const std::string &fileName, const std::string &fault) {
-        json fault_data;
-        try {
-            // 解析fault字符串
-            if (!fault.empty()) {
-                fault_data = json::parse(fault);
-            }
-        } catch (const json::parse_error &e) {
-            LogError << "Failed to parse existing fault data: " << e.what();
-            return;
-        }
-
-        if (!isFileExists(fileName)) {//第一次产生异常，记录时间，并写入file文件
-            fault_data["first_ts"] = base_tools::BaseTimer::GetMilliTime();
-        } else {//已经有异常日志，读取文件内容，获取第一次时间，并插入到fault后保存
-            std::string file_data;
-            if (!readFileLine(fileName, file_data)) {
-                LogError << "Failed to read existing fault data from file.";
-                return;
-            }
-            // 解析file_data
-            if (!file_data.empty()) {
-                try {
-                    json file_data_json = json::parse(file_data);
-                    fault_data["first_ts"] = file_data_json["first_ts"];
-                } catch (const json::parse_error &e) {
-                    LogError << "Failed to parse existing fault data: " << e.what();
-                    fault_data["first_ts"] = base_tools::BaseTimer::GetMilliTime();
-                }
-            }
-        }
-        // 将更新后的数据写入文件
-        std::ofstream file(fileName, std::ios::out | std::ios::trunc);
-        if (!file.is_open()) {
-            LogError << "Failed to open file '" << fileName << "' for writing.";
-            return;
-        }
-        file << fault_data.dump() << std::endl;
-        file.flush();
-    }
-    void clearFault() {
-        if (!isFileExists(FAULT_FILE_SIM)) {
-            LogDebug << "no sim fault log.";
-        } else {
-            std::remove(FAULT_FILE_SIM);// 删除fault文件
-            LogDebug << "sim fault log cleared.";
-        }
-
-        if (!isFileExists(FAULT_FILE_NET)) {
-            LogDebug << "no net fault log.";
-        } else {
-            std::remove(FAULT_FILE_NET);// 删除fault文件
-            LogDebug << "net fault log cleared.";
-        }
-        return;
-    }
+    // ueStateName / regStatString / deriveWirelessErrorCode 等蜂窝诊断判定
+    // 已统一迁移至 cellular_diagnosis.{h,cpp}（error_code 枚举、reg_stat/ue_state
+    // 映射的唯一判定来源），此处不再保留本地副本。
+    // 故障文件机制（saveFault/clearFault/first_ts/上报窗口/静默标志）已随
+    // fault/up 退役整体删除——故障通知统一走 data/up 的 error_code 边沿上报。
 
     void pingSendMsg(std::string taskId, std::string targetIp) {
         LogInfo << "pingSendMsg start.";
@@ -367,6 +257,8 @@ namespace cmsr {
             static bool s_diagFresh = false;     // 本周期刚完成慢变刷新（diag 节点携带标志）
             static rpi::SimInfo s_simInfo;
             static ::vwise::modem::DiagSnapshot s_snap;
+            // error_code 边沿过滤：状态未变化期间省略字段（详见 cellular_diagnosis.h）
+            static ErrorCodeEdgeFilter s_errorCodeEdge;
 
             const int64_t nowMs = base_tools::BaseTimer::GetMilliTime();
             if (nowMs - s_lastSlowAtMs >= kSlowAtRefreshMs) {
@@ -424,8 +316,8 @@ namespace cmsr {
             // （该路径本身也只发 QENG，符合周期内 AT 约束）。
             bool simFault = (simInfo.status == rpi::SimStatus::ABSENT ||
                              simInfo.status == rpi::SimStatus::LOCKED);
-            bool netFault = false;
-            std::string rat = "LTE";   // 弱信号阈值分档用
+            // netFault 四布尔判定已随 fault/up 机制退役（其唯一消费者是故障落盘）；
+            // 网络异常语义统一由 cellular_diagnosis 的 error_code 表达
 
             if (s_snapValid) {
                 // 快变刷新：QENG 失败（URC 串扰/模组忙）保留上次值；
@@ -445,7 +337,6 @@ namespace cmsr {
             if (snapOk) {
                 const auto &sig = snap.signal;
                 if (sig.valid) {
-                    rat = sig.rat;
                     jpb["wireless"]["net_type"] = sig.rat;
                     jpb["wireless"]["rsrp"] = sig.rsrp;
                     jpb["wireless"]["rsrq"] = sig.rsrq;
@@ -468,24 +359,18 @@ namespace cmsr {
                 // （AT+CGMI/CGMM/CGMR 实测值，见上方 getDeviceInfo 段；profile 里是驱动
                 // 画像标签，与实物可能不同族成员，不作上报来源）
 
-                // ---- 故障判定布尔（先算后 dump，dump 后不再改判）----
-                const bool denied = snap.reg.ps_stat == 3 || snap.reg.cs_stat == 3 ||
-                                    snap.reg.stat_5g == 3;
-                const bool noCell = !snap.cell.valid;
-                const bool notRegistered = !snap.effective_registered;
-                const bool weakSignal = sig.valid && sig.rsrp != -999 && m_noNetLTEThr > 0 &&
-                                        sig.rsrp <= (rat == "NR5G" ? m_noNet5GThr : m_noNetLTEThr);
-                netFault = noCell || notRegistered || denied || weakSignal;
-
-                jpb["wireless"]["error_code"] = deriveWirelessErrorCode(
+                // error_code 边沿上报：仅出现/变化/消失的周期携带字段，未变化期间省略
+                const std::string ecDriver = deriveWirelessErrorCode(
                     simInfo, snap, m_noNetLTEThr, m_noNet5GThr);
+                if (s_errorCodeEdge.changed(ecDriver)) {
+                    jpb["wireless"]["error_code"] = ecDriver;
+                }
             } else {
                 // ---- 回退路径：boards 层原查询（无方言层驱动时保持可用）----
                 auto wirelessInfo = module.getNetworkWirelessInfo(0);
                 const auto &signalInfo = wirelessInfo.signal;
                 const auto &cell_info = wirelessInfo.cell;
                 if (wirelessInfo.signal_valid) {
-                    rat = signalInfo.technology;
                     jpb["wireless"]["net_type"] = signalInfo.technology;
                     jpb["wireless"]["rsrp"] = signalInfo.rsrp;
                     jpb["wireless"]["rsrq"] = signalInfo.rsrq;
@@ -496,43 +381,16 @@ namespace cmsr {
                     jpb["wireless"]["cid"] = cell_info.cell_id;
                     jpb["wireless"]["tac"] = cell_info.tac;
                     jpb["wireless"]["reg_err_code"] = cell_info.rej_cause;
-
-                    switch (cell_info.reg_stat) {
-                        case static_cast<int>(rpi::NetworkRegStatus::NOT_REGISTERED):
-                            jpb["wireless"]["reg_stat"] = "NOT_REGISTERED";
-                            break;
-                        case static_cast<int>(rpi::NetworkRegStatus::REGISTERED_HOME):
-                            jpb["wireless"]["reg_stat"] = "REGISTERED_HOME";
-                            break;
-                        case static_cast<int>(rpi::NetworkRegStatus::SEARCHING):
-                            jpb["wireless"]["reg_stat"] = "SEARCHING";
-                            break;
-                        case static_cast<int>(rpi::NetworkRegStatus::REGISTRATION_DENIED):
-                            jpb["wireless"]["reg_stat"] = "REGISTRATION_DENIED";
-                            break;
-                        case static_cast<int>(rpi::NetworkRegStatus::REGISTERED_ROAMING):
-                            jpb["wireless"]["reg_stat"] = "REGISTERED_ROAMING";
-                            break;
-                        case static_cast<int>(rpi::NetworkRegStatus::LIMMITED):
-                            jpb["wireless"]["reg_stat"] = "LIMMITED";
-                            break;
-                        default:
-                            jpb["wireless"]["reg_stat"] = "UNKNOWN";
-                            break;
-                    }
+                    jpb["wireless"]["reg_stat"] = regStatStringFallback(cell_info.reg_stat);
                 }
 
-                const int thr = (rat == "NR5G") ? m_noNet5GThr : m_noNetLTEThr;
-                jpb["wireless"]["error_code"] = simFault
-                    ? "SIM_FAULT"
-                    : (cell_info.reg_stat == static_cast<int>(rpi::NetworkRegStatus::REGISTRATION_DENIED)
-                           ? "REGISTER_FAIL"
-                           : (thr > 0 && signalInfo.rsrp <= thr ? "WEAK_SIGNAL" : "NONE"));
-
-                netFault = cell_info.cell_id.empty() ||
-                           cell_info.reg_stat != static_cast<int>(rpi::NetworkRegStatus::REGISTERED_HOME) ||
-                           (rat == "LTE" && signalInfo.rsrp <= m_noNetLTEThr) ||
-                           (rat == "NR5G" && signalInfo.rsrp <= m_noNet5GThr);
+                // error_code 边沿上报（回退路径与驱动路径共用同一过滤实例——同一台
+                // 设备只有一条 error_code 流）：仅变化周期携带字段，未变化期间省略
+                const std::string ecFallback = deriveWirelessErrorCodeFallback(
+                    wirelessInfo, simFault, m_noNetLTEThr, m_noNet5GThr);
+                if (s_errorCodeEdge.changed(ecFallback)) {
+                    jpb["wireless"]["error_code"] = ecFallback;
+                }
             }
 
             // ---- diag 节点 ----
@@ -575,31 +433,14 @@ namespace cmsr {
                 jpb["wireless"]["apn"] = apn;
             }
 
-            // ---- 故障落盘（判定布尔先算好，dump 后不再改判）----
-            std::string zdpb_str;
-            if (simFault) {
-                zdpb_str = jpb.dump();
-                saveFault(FAULT_FILE_SIM, zdpb_str);
-                LogInfo << "ProbeMgrP::saveSimFault\n";
-            } else if (netFault) {
-                zdpb_str = jpb.dump();
-                saveFault(FAULT_FILE_NET, zdpb_str);
-                LogInfo << "ProbeMgrP::saveNetFault\n";
-            } else {
-                zdpb_str = jpb.dump();
-            }
+            // ---- 故障通知已收敛为 error_code 边沿上报（cellular_diagnosis），
+            // fault 文件机制（saveFault/first_ts/上报窗口）已随 fault/up 退役 ----
+            const std::string zdpb_str = jpb.dump();
             LogDebug << "jpb: " << zdpb_str;
             //just for test MQTT: GYK
             if(1){
-                //如果fault存在，读取fault，并发送fault
-                std::string fault_str;
-
-                if (isFileExists(FAULT_FILE_SIM) && readFileLine(FAULT_FILE_SIM, fault_str)) {
-                    ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_VW_FAULT_UP, fault_str);
-                }
-                if (isFileExists(FAULT_FILE_NET) && readFileLine(FAULT_FILE_NET, fault_str)) {
-                    ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_VW_FAULT_UP, fault_str);
-                }
+                // fault/up 机制已退役（故障通知统一走 data/up 的 error_code 边沿上报）；
+                // topic 常量与配置加载保留，仅不再发布。
                 // 正常发送数据（断网时自动缓存，恢复后补传）
                 ProbeMgr::getInstance().publishData(zdpb_str);
                 LogInfo << "ProbeMgrP::mqtt.messageSend topic:" << TOPIC_DVICE_VW_DATA_UP;
@@ -1069,7 +910,10 @@ namespace cmsr {
         }
 
         void ProbeMgr::proccessZDFaultAck(std::string input, std::string topic) {
-            clearFault();
+            // fault 文件机制已随 fault/up 退役，无文件可清；
+            // 命令映射保留（topic 链路不拆），收到 ack 仅记录
+            LogInfo << "proccessZDFaultAck received (fault file mechanism retired), topic: "
+                    << topic << ", input: " << input;
         }
 
         void ProbeMgr::proccessDataReport(std::string input, std::string topic) {
@@ -1322,6 +1166,11 @@ namespace cmsr {
                     {"/user/mgr/up/ack", [this](std::string input, std::string topic) { proccessUserOnline(input, topic); }},
                     {"ack", [this](std::string input, std::string topic) { proccessZDFaultAck(input, topic); }}};
             // base_tools::util::creatFilePath("/mnt/data/log/ProbeLog");
+
+            // fault 文件机制已退役：一次性清理旧版本残留在运行目录的故障文件
+            // （历史 faultSim/faultNet 不会再被读写，留着只会占目录）
+            std::remove("faultSim");
+            std::remove("faultNet");
 
             readJsonFile("/etc/rw.conf");
             mqtt.start(ProbeMgr::receiveMsgHandler, broker);

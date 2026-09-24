@@ -1,11 +1,11 @@
 /**********************************************************************************************************************
-    > File Name: probe_mgr.h
+    > File Name: probe_manager.h
     > Author: hrliu dmhuang
     > Date: 12/20/23
 **********************************************************************************************************************/
 
-#ifndef TANGO_NEXUS_PROBE_MGR_H
-#define TANGO_NEXUS_PROBE_MGR_H
+#ifndef TANGO_NEXUS_PROBE_MANAGER_H
+#define TANGO_NEXUS_PROBE_MANAGER_H
 
 #include "rpi_cell_info.h"
 #include "mqtt_async_app.h"
@@ -148,4 +148,4 @@ namespace cmsr {
     }//end namespace vwise
 }//end namespace cmsr
 
-#endif//TANGO_NEXUS_PROBE_MGR_H
+#endif//TANGO_NEXUS_PROBE_MANAGER_H

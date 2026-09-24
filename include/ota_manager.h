@@ -37,7 +37,7 @@ namespace cmsr {
             OtaManager(const OtaManager&) = delete;
             OtaManager& operator=(const OtaManager&) = delete;
 
-            void otaWorker(std::string taskId, std::string version,
+            void otaWorker(uint32_t gen, std::string taskId, std::string version,
                            std::string url, std::string sha256, int64_t size);
             bool downloadFile(const std::string& url, const std::string& path);
             bool extractFirmware(const std::string& tarPath, const std::string& outPath); // tar.gz → firmware.bin
@@ -49,7 +49,9 @@ namespace cmsr {
             void commitOta();                                         // 计时器到期：提交
             void rollbackOta();                                       // 回滚到 .bak
 
-            std::atomic<bool> m_running{false};   // 防并发 OTA
+            std::atomic<bool> m_running{false};   // 防并发 OTA（看门狗超时自动复位，见 cpp）
+            std::atomic<int64_t> m_runningSinceMs{0}; // 当前锁的获取时刻（看门狗计时基准）
+            std::atomic<uint32_t> m_workerGen{0};     // 工作线程代际号（看门狗接管后旧线程自弃）
             std::string m_workDir = "/mnt/data/ota";
             std::string m_unit = "v_wise_agent";
             std::string m_exePath;                // 当前可执行文件路径
