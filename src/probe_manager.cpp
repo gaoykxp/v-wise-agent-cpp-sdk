@@ -70,7 +70,7 @@ namespace {
         std::string strJ = j.dump();
         std::string fileName = "/mnt/data/log/ProbeLog/" + taskId + ".txt";
         base_tools::util::writeLogToFile(fileName, strJ);
-        ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_PING_UP, strJ);
+        ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_DVICE_PING_UP, strJ);
     }
 
     void wirelessSendMsg(std::string taskId) {
@@ -87,7 +87,7 @@ namespace {
             std::string msg = j.dump();
             std::string fileName = "/mnt/data/log/ProbeLog/" + taskId + ".txt";
             base_tools::util::writeLogToFile(fileName, msg);
-            ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_WIRELESS_UP, msg);
+            ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_DVICE_WIRELESS_UP, msg);
         }
     }
 
@@ -127,15 +127,15 @@ namespace {
             j1["altitude"] = gpsData.altitude;
 
             std::string msg = j1.dump();
-            ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_DVICE_WIRELESS_UP, msg);
+            ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_DVICE_WIRELESS_UP, msg);
         }
     }
 
     void userOnlineSendMsg() {
         nlohmann::json j;
-        j["imei"] = ProbeMgr::getInstance().m_imei;
+        j["imei"] = ProbeManager::getInstance().m_imei;
         std::string strJ = j.dump();
-        ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_USER_ONLINE, strJ);
+        ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_USER_ONLINE, strJ);
     }
 
     void HeartBeatSendMsg() {
@@ -143,19 +143,19 @@ namespace {
         nlohmann::json j;
         json inner_list = json::array();
         {
-            std::lock_guard<std::recursive_mutex> lock(ProbeMgr::getInstance().mtx);
+            std::lock_guard<std::recursive_mutex> lock(ProbeManager::getInstance().mtx);
 
-            for (int i = 0; i < ProbeMgr::getInstance().vTaskMgr.size(); i++) {
+            for (int i = 0; i < ProbeManager::getInstance().vTaskMgr.size(); i++) {
                 nlohmann::json j1;
-                j1["task_id"] = ProbeMgr::getInstance().vTaskMgr[i].taskId;
-                j1["status"] = ProbeMgr::getInstance().vTaskMgr[i].taskControl;
+                j1["task_id"] = ProbeManager::getInstance().vTaskMgr[i].taskId;
+                j1["status"] = ProbeManager::getInstance().vTaskMgr[i].taskControl;
                 inner_list.push_back(j1);
             }
         }
         j["task_list"] = inner_list;
         std::string strJ = j.dump();
 
-        ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_USER_HEARTBEAT, strJ);
+        ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_USER_HEARTBEAT, strJ);
     }
 }// namespace
 
@@ -165,26 +165,26 @@ namespace cmsr {
         using namespace std::placeholders;
         using json = nlohmann::json;
 
-        ProbeMgr &ProbeMgr::getInstance() {
-            static ProbeMgr m_instance;
+        ProbeManager &ProbeManager::getInstance() {
+            static ProbeManager m_instance;
             return m_instance;
         }
 
-        ProbeMgr::ProbeMgr() : m_imei{std::move(common::GlobalData::Instance()->getImei())} {
+        ProbeManager::ProbeManager() : m_imei{std::move(common::GlobalData::Instance()->getImei())} {
         }
 
-        ProbeMgr::~ProbeMgr() {}
+        ProbeManager::~ProbeManager() {}
 
-        void ProbeMgr::probeTaskDelete(std::string taskId) {
-            for (int index = 0; index < ProbeMgr::getInstance().vTaskMgr.size(); index++) {
+        void ProbeManager::probeTaskDelete(std::string taskId) {
+            for (int index = 0; index < ProbeManager::getInstance().vTaskMgr.size(); index++) {
                 if (vTaskMgr[index].taskId == taskId) {
-                    vTaskMgr.erase(ProbeMgr::getInstance().vTaskMgr.begin() + index);
+                    vTaskMgr.erase(ProbeManager::getInstance().vTaskMgr.begin() + index);
                     break;
                 }
             }
         }
 
-        void ProbeMgr::vwiseProbeTaskHandle() {
+        void ProbeManager::vwiseProbeTaskHandle() {
             json jpb;
             // 获取设备信息
             auto &module = rpi::RPIModuleInterface::getInstance();
@@ -248,7 +248,7 @@ namespace cmsr {
             // 其余 AT 均为慢变量，每 kSlowAtRefreshMs 全量刷新一次，其余周期复用缓存：
             //   SIM 状态（AT+CPIN?）、注册三域（AT+C5GREG?/CEREG?/CREG?）、PDP（AT+CGPADDR）
             // 刷新失败的重试策略见下方分档（曾成功→立即重试；从未成功→仍按节流）。
-            // 注意：静态缓存基于 ProbeMgr 单例；DiagSnapshot 位于全局命名空间，
+            // 注意：静态缓存基于 ProbeManager 单例；DiagSnapshot 位于全局命名空间，
             // 此处 cmsr::vwise 内必须写 ::vwise::modem（相对解析会找 cmsr::vwise::modem）
             static constexpr int64_t kSlowAtRefreshMs = 30000;
             static int64_t s_lastSlowAtMs = 0;
@@ -442,8 +442,8 @@ namespace cmsr {
                 // fault/up 机制已退役（故障通知统一走 data/up 的 error_code 边沿上报）；
                 // topic 常量与配置加载保留，仅不再发布。
                 // 正常发送数据（断网时自动缓存，恢复后补传）
-                ProbeMgr::getInstance().publishData(zdpb_str);
-                LogInfo << "ProbeMgrP::mqtt.messageSend topic:" << TOPIC_DVICE_VW_DATA_UP;
+                ProbeManager::getInstance().publishData(zdpb_str);
+                LogInfo << "ProbeManagerP::mqtt.messageSend topic:" << TOPIC_DVICE_VW_DATA_UP;
             }
 
             // ==================== [临时测试代码] 模组软重启验证（宏开关，默认关闭） ====================
@@ -493,7 +493,7 @@ namespace cmsr {
         }
 
         // 周期采集数据上报（带断连缓存）
-        void ProbeMgr::publishData(const std::string &payload) {
+        void ProbeManager::publishData(const std::string &payload) {
             if (!m_cacheEnabled) {
                 mqtt.messageSend(TOPIC_DVICE_VW_DATA_UP, payload);
                 return;
@@ -511,7 +511,7 @@ namespace cmsr {
         }
 
         // 后台逐条回传本地缓存（网络恢复后调用）
-        void ProbeMgr::flushOfflineCache() {
+        void ProbeManager::flushOfflineCache() {
             bool expected = false;
             if (!m_flushing.compare_exchange_strong(expected, true)) {
                 return;  // 已有补传在跑
@@ -519,26 +519,26 @@ namespace cmsr {
             std::thread([this] {
                 size_t n = m_offlineCache.flush(
                     [](const std::string &topic, const std::string &payload) -> bool {
-                        return ProbeMgr::getInstance().mqtt.isConnected()
-                            && ProbeMgr::getInstance().mqtt.sendOnce(topic, payload);
+                        return ProbeManager::getInstance().mqtt.isConnected()
+                            && ProbeManager::getInstance().mqtt.sendOnce(topic, payload);
                     });
                 LogInfo << "offline cache flushed: " << n << " records";
-                ProbeMgr::getInstance().m_flushing = false;
+                ProbeManager::getInstance().m_flushing = false;
             }).detach();
         }
 
-        int ProbeMgr::probeTaskSearch(std::string taskId) {
+        int ProbeManager::probeTaskSearch(std::string taskId) {
             int index;
-            for (index = 0; index < ProbeMgr::getInstance().vTaskMgr.size(); index++) {
+            for (index = 0; index < ProbeManager::getInstance().vTaskMgr.size(); index++) {
                 if (vTaskMgr[index].taskId == taskId) {
                     break;
                 }
             }
-            ProbeMgr::getInstance().vTaskMgr[index].execNum--;
-            return ProbeMgr::getInstance().vTaskMgr[index].execNum;
+            ProbeManager::getInstance().vTaskMgr[index].execNum--;
+            return ProbeManager::getInstance().vTaskMgr[index].execNum;
         }
 
-        void ProbeMgr::readJsonFile(const std::string &cfgPath) {
+        void ProbeManager::readJsonFile(const std::string &cfgPath) {
             std::string TopicPrefix;
             std::string UserOnline;
             // std::fstream fin(cfgPath);
@@ -668,7 +668,7 @@ namespace cmsr {
 
         }
 
-        void ProbeMgr::vwiseProccessTaskMgrHandle(sTaskMgrInfoPb &tm) {
+        void ProbeManager::vwiseProccessTaskMgrHandle(sTaskMgrInfoPb &tm) {
             int result = 0;
 
             if (tm.p.address.empty()) {
@@ -688,11 +688,11 @@ namespace cmsr {
                     std::string targetIp = tm.p.address;
                     int execNum = tm.execNum > 0 ? tm.execNum : 1;
                     int frequency = tm.frequency > 0 ? tm.frequency : 1;
-                    ProbeMgr::getInstance().m_timerPing.start(frequency * 1000, [taskId, targetIp, execNum]() mutable {
+                    ProbeManager::getInstance().m_timerPing.start(frequency * 1000, [taskId, targetIp, execNum]() mutable {
                         pingSendMsg(taskId, targetIp);
                         execNum--;
                         if (execNum <= 0) {
-                            ProbeMgr::getInstance().m_timerPing.stop();
+                            ProbeManager::getInstance().m_timerPing.stop();
                             PING::getInstance().stop();
                             nlohmann::json j;
                             j["task_id"] = taskId;
@@ -704,7 +704,7 @@ namespace cmsr {
             } else if (tm.taskControl == TaskStopPb) {
                 if (PING::getInstance().isPingEnabled()) {
                     LogDebug << "stop ping task, address:" << tm.p.address;
-                    ProbeMgr::getInstance().m_timerPing.stop();
+                    ProbeManager::getInstance().m_timerPing.stop();
                     PING::getInstance().stop();
                 }
             } else {
@@ -716,51 +716,51 @@ namespace cmsr {
             j["task_id"] = tm.taskId;
             j["result"] = result;
             LogDebug << "task result: " << j.dump();
-            if (!ProbeMgr::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK.empty()) {
-                ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK, j.dump());
+            if (!ProbeManager::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK.empty()) {
+                ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK, j.dump());
             }
 
             return;
         }
 
-        void ProbeMgr::proccessTaskMgrHandle(sTaskMgrInfoPb &tm) {
+        void ProbeManager::proccessTaskMgrHandle(sTaskMgrInfoPb &tm) {
             int result = 0;
             bool found = false;
             int index = 0;
             {
                 std::lock_guard<std::recursive_mutex> lock(mtx);
-                for (index = 0; index < ProbeMgr::getInstance().vTaskMgr.size(); index++) {
-                    if (ProbeMgr::getInstance().vTaskMgr[index].taskId == tm.taskId) {
+                for (index = 0; index < ProbeManager::getInstance().vTaskMgr.size(); index++) {
+                    if (ProbeManager::getInstance().vTaskMgr[index].taskId == tm.taskId) {
                         found = true;
                         break;
                     }
                 }
                 if (found) {
                     // LogInfo << "This is old task, taskControl:" << tm.taskControl;
-                    if (ProbeMgr::getInstance().vTaskMgr[index].execNum > 0) {
+                    if (ProbeManager::getInstance().vTaskMgr[index].execNum > 0) {
 
-                        if (tm.taskControl == TaskStartPb && ProbeMgr::getInstance().vTaskMgr[index].taskControl == TaskPausePb) {
-                            ProbeMgr::getInstance().vTaskMgr[index].taskControl = TaskStartPb;
+                        if (tm.taskControl == TaskStartPb && ProbeManager::getInstance().vTaskMgr[index].taskControl == TaskPausePb) {
+                            ProbeManager::getInstance().vTaskMgr[index].taskControl = TaskStartPb;
                             probeTaskStart(vTaskMgr[index]);
                         } else if (tm.taskControl == TaskStopPb) {
-                            ProbeMgr::getInstance().vTaskMgr[index].execNum = 0;
+                            ProbeManager::getInstance().vTaskMgr[index].execNum = 0;
                             probeTaskStop(vTaskMgr[index]);
 
-                            std::string imei = ProbeMgr::getInstance().m_imei;
-                            if (ProbeMgr::getInstance().vTaskMgr[index].uploadType == 0) {
+                            std::string imei = ProbeManager::getInstance().m_imei;
+                            if (ProbeManager::getInstance().vTaskMgr[index].uploadType == 0) {
 #ifdef ENABLE_MINIO
-                                if (MINIO::getInstance().minioUploadFile(ProbeMgr::getInstance().vTaskMgr[index].taskId, "/mnt/data/log/ProbeLog/", imei)) {
-                                    std::string filePath = "/mnt/data/log/ProbeLog/" + ProbeMgr::getInstance().vTaskMgr[index].taskId + ".txt";
+                                if (MINIO::getInstance().minioUploadFile(ProbeManager::getInstance().vTaskMgr[index].taskId, "/mnt/data/log/ProbeLog/", imei)) {
+                                    std::string filePath = "/mnt/data/log/ProbeLog/" + ProbeManager::getInstance().vTaskMgr[index].taskId + ".txt";
                                     remove(filePath.c_str());
                                 }
 #else
                                 LogInfo << "MINIO upload disabled";
 #endif
                             }
-                            ProbeMgr::getInstance().vTaskMgr.erase(ProbeMgr::getInstance().vTaskMgr.begin() + index);
+                            ProbeManager::getInstance().vTaskMgr.erase(ProbeManager::getInstance().vTaskMgr.begin() + index);
                         } else if (tm.taskControl == TaskPausePb) {
                             probeTaskStop(vTaskMgr[index]);
-                            ProbeMgr::getInstance().vTaskMgr[index].taskControl = TaskPausePb;
+                            ProbeManager::getInstance().vTaskMgr[index].taskControl = TaskPausePb;
                         } else {
                             LogError << "This is a old task, but taskControl:" << tm.taskControl;
                             result = 1;
@@ -772,7 +772,7 @@ namespace cmsr {
                 } else {
                     // LogInfo << "This is new task, taskControl:" << tm.taskControl << ", index:" << index;
                     bool foundTaskType = false;
-                    for (int index1 = 0; index1 < ProbeMgr::getInstance().vTaskMgr.size(); index1++) {
+                    for (int index1 = 0; index1 < ProbeManager::getInstance().vTaskMgr.size(); index1++) {
                         if (vTaskMgr[index1].taskType == tm.taskType) {
                             foundTaskType = true;
                             break;
@@ -783,7 +783,7 @@ namespace cmsr {
                         result = 1;
                     } else {
                         if (tm.taskControl == TaskStartPb) {
-                            ProbeMgr::getInstance().vTaskMgr.push_back(tm);
+                            ProbeManager::getInstance().vTaskMgr.push_back(tm);
                             probeTaskStart(tm);
                         } else {
                             LogError << "This is a new task, but taskControl:" << tm.taskControl;
@@ -799,24 +799,24 @@ namespace cmsr {
             LogDebug << "task result: " << j.dump();
         }
 
-        void ProbeMgr::probeTaskStart(sTaskMgrInfoPb &tm) {
+        void ProbeManager::probeTaskStart(sTaskMgrInfoPb &tm) {
             std::string taskId = tm.taskId;
             int uploadType = tm.uploadType;
-            std::string imei = ProbeMgr::getInstance().m_imei;
+            std::string imei = ProbeManager::getInstance().m_imei;
             if (tm.taskType == PingPb) {
                 PING::getInstance().start(tm.p.address);
                 std::string targetIp = tm.p.address;
-                ProbeMgr::getInstance().m_timerPing.start(tm.frequency * 1000, [taskId, targetIp, uploadType, imei] {
+                ProbeManager::getInstance().m_timerPing.start(tm.frequency * 1000, [taskId, targetIp, uploadType, imei] {
                     int execNum;
                     {
-                        std::lock_guard<std::recursive_mutex> lock(ProbeMgr::getInstance().mtx);
-                        execNum = ProbeMgr::getInstance().probeTaskSearch(taskId);
+                        std::lock_guard<std::recursive_mutex> lock(ProbeManager::getInstance().mtx);
+                        execNum = ProbeManager::getInstance().probeTaskSearch(taskId);
                     }
                     //lock.unlock();
                     if (execNum >= 0) {
                         pingSendMsg(taskId, targetIp);
                         if (execNum == 0) {
-                            ProbeMgr::getInstance().m_timerPing.stop();
+                            ProbeManager::getInstance().m_timerPing.stop();
                             PING::getInstance().stop();
                             nlohmann::json j1;
                             j1["task_id"] = taskId;
@@ -834,7 +834,7 @@ namespace cmsr {
                                 j1["status"] = 0;
 #endif
                                 std::string payload1 = j1.dump();
-                                ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_PLAT_UPLOAD_DOWN_ACK, payload1);
+                                ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_PLAT_UPLOAD_DOWN_ACK, payload1);
                             }
 
                             nlohmann::json j;
@@ -842,28 +842,28 @@ namespace cmsr {
                             j["result"] = 2;
                             LogDebug << "task completed: " << j.dump();
                             {
-                                std::lock_guard<std::recursive_mutex> lock(ProbeMgr::getInstance().mtx);
-                                ProbeMgr::getInstance().probeTaskDelete(taskId);
+                                std::lock_guard<std::recursive_mutex> lock(ProbeManager::getInstance().mtx);
+                                ProbeManager::getInstance().probeTaskDelete(taskId);
                             }
                         }
                     } });
             }
             if (tm.taskType == WirelessPb) {
                 // CellInfoCollector::getInstance().start(tm.frequency * 1000, taskId);
-                ProbeMgr::getInstance().m_timerWireless.start(tm.frequency * 1000, [taskId, uploadType, imei] {
+                ProbeManager::getInstance().m_timerWireless.start(tm.frequency * 1000, [taskId, uploadType, imei] {
                     int execNum;
                     {
-                        //std::unique_lock<std::mutex> lock(ProbeMgr::getInstance().mtx, std::defer_lock);
-                        std::lock_guard<std::recursive_mutex> lock(ProbeMgr::getInstance().mtx);
+                        //std::unique_lock<std::mutex> lock(ProbeManager::getInstance().mtx, std::defer_lock);
+                        std::lock_guard<std::recursive_mutex> lock(ProbeManager::getInstance().mtx);
                         //lock.lock();
-                        execNum = ProbeMgr::getInstance().probeTaskSearch(taskId);
+                        execNum = ProbeManager::getInstance().probeTaskSearch(taskId);
                         //lock.unlock();
                     }
 
                     if (execNum >= 0) {
                         wirelessSendMsg(taskId);
                         if (execNum == 0) {
-                            ProbeMgr::getInstance().m_timerWireless.stop();
+                            ProbeManager::getInstance().m_timerWireless.stop();
                             //CellInfoCollector::getInstance().stop();
                             nlohmann::json j1;
                             j1["task_id"] = taskId;
@@ -881,7 +881,7 @@ namespace cmsr {
                                 j1["status"] = 0;
 #endif
                                 std::string payload1 = j1.dump();
-                                ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_PLAT_UPLOAD_DOWN_ACK,
+                                ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_PLAT_UPLOAD_DOWN_ACK,
                                                                          payload1);
                             }
                             nlohmann::json j;
@@ -889,8 +889,8 @@ namespace cmsr {
                             j["result"] = 2;
                             LogDebug << "task completed: " << j.dump();
                             {
-                                std::lock_guard<std::recursive_mutex> lock(ProbeMgr::getInstance().mtx);
-                                ProbeMgr::getInstance().probeTaskDelete(taskId);
+                                std::lock_guard<std::recursive_mutex> lock(ProbeManager::getInstance().mtx);
+                                ProbeManager::getInstance().probeTaskDelete(taskId);
                             }
                         }
                     } });
@@ -898,29 +898,29 @@ namespace cmsr {
 
         }
 
-        void ProbeMgr::probeTaskStop(sTaskMgrInfoPb &tm) {
+        void ProbeManager::probeTaskStop(sTaskMgrInfoPb &tm) {
             if (tm.taskType == PingPb) {
-                ProbeMgr::getInstance().m_timerPing.stop();
+                ProbeManager::getInstance().m_timerPing.stop();
                 PING::getInstance().stop();
             }
             if (tm.taskType == WirelessPb) {
                 // CellInfoCollector::getInstance().stop();
-                ProbeMgr::getInstance().m_timerWireless.stop();
+                ProbeManager::getInstance().m_timerWireless.stop();
             }
         }
 
-        void ProbeMgr::proccessZDFaultAck(std::string input, std::string topic) {
+        void ProbeManager::proccessZDFaultAck(std::string input, std::string topic) {
             // fault 文件机制已随 fault/up 退役，无文件可清；
             // 命令映射保留（topic 链路不拆），收到 ack 仅记录
             LogInfo << "proccessZDFaultAck received (fault file mechanism retired), topic: "
                     << topic << ", input: " << input;
         }
 
-        void ProbeMgr::proccessDataReport(std::string input, std::string topic) {
+        void ProbeManager::proccessDataReport(std::string input, std::string topic) {
             LogInfo << "proccessDataReport received, topic: " << topic << ", input: " << input;
             // Handle data report message from platform
         }
-        void ProbeMgr::proccessTaskMgr(std::string input, std::string topic) {
+        void ProbeManager::proccessTaskMgr(std::string input, std::string topic) {
             LogInfo << "input:" << input;
             sTaskMgrInfoPb tm;
             if (nlohmann::json::accept(input)) {
@@ -982,8 +982,8 @@ namespace cmsr {
                             LogDebug<<"set noNetLTEThr: "<<tm.p.noNetLTEThr;
                         }
                     }
-                    // ProbeMgr::getInstance().proccessTaskMgrHandle(tm);
-                    ProbeMgr::getInstance().vwiseProccessTaskMgrHandle(tm);
+                    // ProbeManager::getInstance().proccessTaskMgrHandle(tm);
+                    ProbeManager::getInstance().vwiseProccessTaskMgrHandle(tm);
                 }
             } else {
                 LogDebug << "command message, format error";
@@ -994,7 +994,7 @@ namespace cmsr {
 
         // 解析 sys/commands 下发的采集配置指令，动态调整上传内容与频率
         // 指令格式：{"cmd_type":"collection_config","vid":...,"category":"full|core","interval_sec":N,"retention_days":N,"name":...}
-        void ProbeMgr::proccessCollectionConfig(const nlohmann::json &j) {
+        void ProbeManager::proccessCollectionConfig(const nlohmann::json &j) {
             // imei 非空且与本设备 imei 不符则忽略
             if (j.contains("imei") && j["imei"].is_string()) {
                 std::string imei = j["imei"].get<std::string>();
@@ -1055,12 +1055,12 @@ namespace cmsr {
         }
 
         // 按当前 m_collectIntervalMs 重启主采集定时器（Timer::start 不可重入，需先 stop）
-        void ProbeMgr::restartCollectionTimer() {
+        void ProbeManager::restartCollectionTimer() {
             m_timerZD.stop();
             m_timerZD.start(m_collectIntervalMs, [this] { vwiseProbeTaskHandle(); });
             LogInfo << "collection timer restarted, interval_ms=" << m_collectIntervalMs;
         }
-        void ProbeMgr::proccessSwitch(const std::string &input, const std::string &topic) {
+        void ProbeManager::proccessSwitch(const std::string &input, const std::string &topic) {
             // LogInfo << "input:" << input << ", topic: " << topic;
             nlohmann::json jAck;
             if (nlohmann::json::accept(input)) {
@@ -1086,22 +1086,22 @@ namespace cmsr {
                 jAck["status"] = 1;
             }
             std::string payload1 = jAck.dump();
-            ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_USER_SWITCHING_CHANNELS_ACK,
+            ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_USER_SWITCHING_CHANNELS_ACK,
                                                      payload1);
         }
 
-        void ProbeMgr::proccessUserOnline(std::string input, std::string topic) {
+        void ProbeManager::proccessUserOnline(std::string input, std::string topic) {
             if (nlohmann::json::accept(input)) {
                 nlohmann::json j = nlohmann::json::parse(input);
                 if (j.is_discarded()) {
                     LogInfo << "input data is not right json ..., " << topic;
                 } else {
-                    ProbeMgr::getInstance().m_timerUser.stop();
+                    ProbeManager::getInstance().m_timerUser.stop();
                 }
             }
         }
 
-        void ProbeMgr::proccessUploadFile(std::string input, std::string topic) {
+        void ProbeManager::proccessUploadFile(std::string input, std::string topic) {
             if (nlohmann::json::accept(input)) {
                 nlohmann::json j = nlohmann::json::parse(input);
                 std::string taskId;
@@ -1118,7 +1118,7 @@ namespace cmsr {
 
                     if (base_tools::util::fileExistsInFolder(path, filename)) {
                         // LogInfo << "Found the file ...";
-                        std::string imei = ProbeMgr::getInstance().m_imei;
+                        std::string imei = ProbeManager::getInstance().m_imei;
 #ifdef ENABLE_MINIO
                         if (MINIO::getInstance().minioUploadFile(taskId, "/mnt/data/log/ProbeLog/", imei)) {
                             std::string filePath = "/mnt/data/log/ProbeLog/" + taskId + ".txt";
@@ -1135,20 +1135,20 @@ namespace cmsr {
                     }
 
                     std::string payload1 = j1.dump();
-                    ProbeMgr::getInstance().mqtt.messageSend(ProbeMgr::getInstance().TOPIC_PLAT_UPLOAD_DOWN_ACK,
+                    ProbeManager::getInstance().mqtt.messageSend(ProbeManager::getInstance().TOPIC_PLAT_UPLOAD_DOWN_ACK,
                                                              payload1);
                 }
             }
         }
 
-        int ProbeMgr::receiveMsgHandler(void *context, char *topicName, int topicLen, MQTTAsync_message *message) {
+        int ProbeManager::receiveMsgHandler(void *context, char *topicName, int topicLen, MQTTAsync_message *message) {
             std::string input((char *) message->payload, message->payloadlen);
             std::string topicStr((char *) topicName, topicLen);
             // LogInfo << "receive message with UU: " << topicStr << ", message: " << input;
 
             for (std::map<std::string, std::function<void(std::string, std::string)>>::iterator iter =
-                         ProbeMgr::getInstance().handleMap.begin();
-                 iter != ProbeMgr::getInstance().handleMap.end(); ++iter) {
+                         ProbeManager::getInstance().handleMap.begin();
+                 iter != ProbeManager::getInstance().handleMap.end(); ++iter) {
                 if (topicStr.find(iter->first) != string::npos) {
                     iter->second(input, topicStr);
                     break;
@@ -1160,7 +1160,7 @@ namespace cmsr {
             return 1;
         }
 
-        void ProbeMgr::probeMgrStart() {
+        void ProbeManager::probeMgrStart() {
             handleMap = {
                     {"/sys/commands", [this](std::string input, std::string topic) { proccessTaskMgr(input, topic); }},
                     {"/user/mgr/up/ack", [this](std::string input, std::string topic) { proccessUserOnline(input, topic); }},
@@ -1173,7 +1173,7 @@ namespace cmsr {
             std::remove("faultNet");
 
             readJsonFile("/etc/rw.conf");
-            mqtt.start(ProbeMgr::receiveMsgHandler, broker);
+            mqtt.start(ProbeManager::receiveMsgHandler, broker);
 
             // 周期采集数据断连缓存初始化（config.json -> Vwise.OfflineCache）
             {
@@ -1212,7 +1212,7 @@ namespace cmsr {
 
         }
 
-        void ProbeMgr::probeMgrStop() {
+        void ProbeManager::probeMgrStop() {
             LogInfo << "probeMgrStop ...";
             PING::getInstance().stop();
             rpi::RPIModuleInterface::getInstance().deinit();

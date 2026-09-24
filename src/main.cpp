@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
         {
             if (Authenticator::getInstance().authenticate().size() > 0)
             {
-                ProbeMgr::getInstance().probeMgrStart();
+                ProbeManager::getInstance().probeMgrStart();
                 break;
             }
             sleep(1);
@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
     }
     else
     {
-        ProbeMgr::getInstance().probeMgrStart();
+        ProbeManager::getInstance().probeMgrStart();
     }
 
     while (true)

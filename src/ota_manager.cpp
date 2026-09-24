@@ -332,14 +332,14 @@ namespace cmsr {
             jResult["status"] = status;
             if (!extra.empty()) jResult["detail"] = extra;
             jResult["version"] = version;
-            jResult["imei"] = ProbeMgr::getInstance().m_imei;
+            jResult["imei"] = ProbeManager::getInstance().m_imei;
             j["result"] = jResult;
             std::string payload = j.dump();
             // OTA 回执全文打印（journal/日志文件可见），便于现场核对平台侧收到的内容
-            LogInfo << "[OTA report] topic=" << ProbeMgr::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK
+            LogInfo << "[OTA report] topic=" << ProbeManager::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK
                     << ", payload=" << payload;
-            ProbeMgr::getInstance().mqtt.messageSend(
-                ProbeMgr::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK, payload);
+            ProbeManager::getInstance().mqtt.messageSend(
+                ProbeManager::getInstance().TOPIC_PLAT_ORDER_DOWN_ACK, payload);
         }
 
         void OtaManager::restartSelf() {

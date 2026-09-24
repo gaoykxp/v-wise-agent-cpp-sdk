@@ -59,7 +59,7 @@ namespace cmsr {
             sParasInfoPb p;
         } sTaskMgrInfoPb;
 
-        class ProbeMgr {
+        class ProbeManager {
         public:
             void probeMgrStart();
             void probeMgrStop();
@@ -114,13 +114,13 @@ namespace cmsr {
             std::string TOPIC_DVICE_VW_FAULT_ACK;//index up for v-wise
 
         public:
-            static ProbeMgr &getInstance();
+            static ProbeManager &getInstance();
 
         private:
-            ProbeMgr();
-            ProbeMgr(const ProbeMgr &) = delete;
-            ProbeMgr &operator=(const ProbeMgr &) = delete;
-            ~ProbeMgr();
+            ProbeManager();
+            ProbeManager(const ProbeManager &) = delete;
+            ProbeManager &operator=(const ProbeManager &) = delete;
+            ~ProbeManager();
 
         private:
             Timer m_timerPing;
