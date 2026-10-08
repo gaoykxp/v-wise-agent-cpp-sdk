@@ -2,8 +2,11 @@
     > File Name: cellular_diagnosis.h
     > Desc: 蜂窝诊断判定统一单元——wireless.error_code 枚举推导与注册/驻网状态字符串映射。
     >       驱动路径（DiagSnapshot 快照）与回退路径（boards 层 QENG 查询）共用同一套
-    >       枚举语义（6 值）：NONE / SIM_FAULT / REGISTER_FAIL / NOT_REGISTERED /
-    >       NO_CELL / WEAK_SIGNAL，优先级同此排列顺序（高→低）。
+    >       枚举语义（9 值）：NONE / SIM_FAULT / REGISTER_FAIL / NET_RESOURCE_SHORT /
+    >       NOT_REGISTERED / NO_CELL / WEAK_SIGNAL / REBOOT / G4G5_SWITCH。
+    >       前 7 值为状态推导值（NET_RESOURCE_SHORT 是 REGISTER_FAIL 的资源性
+    >       拒绝细分），优先级同此排列顺序（高→低）；REBOOT 与 G4G5_SWITCH
+    >       为事件型值（不参与优先级链，见下方常量与检测器）。
     >       故障通知已收敛为本单元的 error_code 边沿上报（fault/up 机制退役）。
     >       纯函数、无状态（判定输入全部由调用方给出），供 probe_manager 周期采集调用；
     >       唯一的例外是 ErrorCodeEdgeFilter——持有上一周期值做边沿/消抖。
@@ -19,17 +22,60 @@
 namespace cmsr {
     namespace vwise {
 
-        // ==================== wireless.error_code（6 枚举值） ====================
+        // ==================== wireless.error_code（状态推导，7 枚举值） ====================
         // 驱动路径：按 DiagSnapshot 真实状态推导，供平台异常监测展示。
-        // 优先级：SIM_FAULT > REGISTER_FAIL > NOT_REGISTERED > NO_CELL > WEAK_SIGNAL > NONE
+        // 优先级：SIM_FAULT > REGISTER_FAIL > NET_RESOURCE_SHORT > NOT_REGISTERED
+        //         > NO_CELL > WEAK_SIGNAL > NONE
+        // NET_RESOURCE_SHORT：注册被拒且被拒域原因码为 22（congestion，网络
+        // 资源不足）——REGISTER_FAIL 的资源性细分，与 REGISTER_FAIL 同档判定、
+        // 仅返回值更特异。仅驱动路径可判（EPS 域原因码由 CEREG? 解析，
+        // 5GS 域由 C5GREG?/Q5GREG? 解析——SA 网下 EPS 域恒 0 时 5GS 域是事实
+        // 来源；22 在 EMM/5GMM 两码空间同码同义。回退路径 boards 层不采集
+        // 原因码，被拒时维持 REGISTER_FAIL）。
+        // 判定成立时对应域原因码同帧携带（EPS：wireless.reg_err_code；
+        // 5GS：diag.reg_cause_5g），平台可交叉核验。
+        inline constexpr int kRejectCauseCongestion = 22;  // 3GPP TS 24.301 EMM / TS 24.501 5GMM cause #22
         std::string deriveWirelessErrorCode(const rpi::SimInfo &simInfo,
                                             const ::vwise::modem::DiagSnapshot &snap,
                                             int lteThr, int nrThr);
 
-        // 回退路径：boards 层 QENG 原始查询结果推导（无方言层驱动时保持可用）
+        // 回退路径：boards 层 QENG 原始查询结果推导（无方言层驱动时保持可用）。
+        // 注：boards 层不采集拒绝原因码（rej_cause 恒 0），资源性拒绝无法细分，
+        // 被拒时一律 REGISTER_FAIL
         std::string deriveWirelessErrorCodeFallback(
             const rpi::RPIModuleInterface::NetworkWirelessInfo &wirelessInfo,
             bool simFault, int lteThr, int nrThr);
+
+        // ==================== REBOOT（事件型枚举值，第 7 值） ====================
+        // 模组启动完成事件，不参与上方状态优先级链（无法从快照推导）。判定机制
+        // （检测逻辑见 probe_manager）：运行期 URC +QIND: "PB DONE"（模组启动/
+        // 重启完成）→ 随下一条消息的 wireless.error_code 携带 "REBOOT"；该拍
+        // 跳过边沿过滤（保持无历史状态），下一周期按首周期语义携带一次真实
+        // 状态值，此后回归边沿上报。SDK 启动早于模组启动完成时首周期即可检出；
+        // 晚于启动完成的场景无事件可检（不做主动查询）。
+        inline constexpr const char *kErrorCodeReboot = "REBOOT";
+
+        // ==================== G4G5_SWITCH（事件型枚举值，第 8 值） ====================
+        // 4G(LTE) ↔ 5G(NR5G) 网络制式切换事件，由 RatSwitchDetector 逐周期比较
+        // 有效 RAT 检测（跳变发生的那个周期随消息携带一次）。同样不参与状态
+        // 优先级链。同周期与状态错误冲突时状态错误优先（见 probe_manager）。
+        inline constexpr const char *kErrorCodeRatSwitch = "G4G5_SWITCH";
+
+        // 4/5G 制式切换边沿检测器：喂入本周期 RAT（驱动路径 QENG 归一为
+        // "NR5G"/"LTE"，回退路径 technology 同值域），与上周期比较。
+        // 无效 RAT（查询失败/空/"Unknown"/WCDMA/GSM 等非 4/5G 制式）的周期
+        // 不判定也不动基线——QENG 瞬时失败不会造成假切换；首个有效 RAT 只
+        // 建基线不触发（开机驻留在哪个制式不是"切换"）。
+        class RatSwitchDetector {
+        public:
+            // 返回 true 表示本周期发生了 4G↔5G 切换（调用方随消息上报一次）
+            bool switched(const std::string &rat);
+
+        private:
+            enum class Fam { Unknown, Lte, Nr };
+            static Fam family(const std::string &rat);   // "NR5G*"→Nr；"LTE"→Lte；其余 Unknown
+            Fam m_last = Fam::Unknown;
+        };
 
         // ==================== 状态字符串映射（reg_stat / ue_state） ====================
         // QENG <state> → 字符串（驻网/注册/业务态，定界关键判据：

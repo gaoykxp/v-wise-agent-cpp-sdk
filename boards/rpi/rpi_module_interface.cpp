@@ -548,6 +548,24 @@ namespace rpi {
                 devinfo.modem_model = module_info->model;
                 devinfo.firmware_version = module_info->revision;
                 devinfo.sn = module_info->sn;
+                // AT 侧无硬件版本查询（CGMI/CGMM/CGMR/GSN 均不覆盖）：
+                // hw_version 统一取树莓派 /proc/device-tree/model（板卡型号串，如
+                // "Raspberry Pi 5 Model B Rev 1.0"，去厂商前缀 "Raspberry " 后上报
+                // "Pi 5 Model B Rev 1.0"）。该文件为扁平单行、末尾带 \0
+                // （device-tree 导出格式），读取后去尾部空字节
+                std::ifstream modelFile("/proc/device-tree/model");
+                std::string modelStr;
+                if (std::getline(modelFile, modelStr)) {
+                    const size_t nul = modelStr.find('\0');
+                    if (nul != std::string::npos) modelStr.resize(nul);
+                    static const char kVendorPrefix[] = "Raspberry ";
+                    if (modelStr.rfind(kVendorPrefix, 0) == 0) {
+                        modelStr.erase(0, sizeof(kVendorPrefix) - 1);
+                    }
+                    if (!modelStr.empty()) {
+                        devinfo.hardware_version = modelStr;
+                    }
+                }
                 std::lock_guard<std::mutex> lk(m_mutex);
                 m_cachedDeviceInfo = devinfo;
                 m_devInfoCached = true;

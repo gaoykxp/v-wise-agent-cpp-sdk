@@ -72,7 +72,9 @@ struct RegInfo {
     int ps_stat{-1};        // EPS 域（AT+CEREG?）
     int cs_stat{-1};        // CS 域（AT+CREG?）
     int stat_5g{-1};        // 5GS 域（AT+C5GREG? / AT+Q5GREG?）
-    int reject_cause{0};    // 注册被拒原因码（CEREG 第 6 段 <reject_cause>）
+    int reject_cause{0};    // EPS 域注册被拒原因码（CEREG <reject_cause>，EMM cause TS 24.301）
+    int reject_cause_5g{0}; // 5GS 域注册被拒原因码（C5GREG/Q5GREG <reject_cause>，5GMM cause TS 24.501。
+                            // 仅 SA 网有意义；NSA 锚点在 EPC，拒绝走 EPS 域。拥塞码 22 在两域同码同义）
     std::string tac;        // 跟踪区码（hex）
     std::string ci;         // 小区标识（hex）
 
@@ -109,7 +111,7 @@ struct DataBearer {
     std::string ip;
 };
 
-// ==================== 模组画像：能力与怪癖的数据化描述 ====================
+// ==================== 模组画像：能力与厂商No-3GPP特性的数据化描述 ====================
 
 struct ModemProfile {
     const char* vendor{""};     // "quectel" / "simcom" / "fibocom"
@@ -120,7 +122,7 @@ struct ModemProfile {
     bool has_q5greg{false};             // Quectel 私有 5G 注册查询
     bool has_ceer{false};               // 扩展错误报告（AT+CEER，失败原因文本）
     bool has_adc{false};                // 供电电压采集（AT+QADC）
-    // ---- 怪癖标志（集中在此声明，禁止散落 #ifdef）----
+    // ---- 厂商No-3GPP特性标志（集中在此声明，禁止散落 #ifdef）----
     bool quirk_cereg_zero_on_sa{false};     // SA 下 EPS CEREG 恒 0，注册判定须看 5GS 域
     bool quirk_pdp_implies_registered{false}; // PDP 持有效 IP ⇒ 实际已注册（注册查询失真兜底）
 };
@@ -147,7 +149,7 @@ public:
     // 绑定 AT 通道并完成该模组的 URC 使能与处理器注册（幂等，可重复调用）
     virtual bool init(IAtChannel& ch) = 0;
 
-    // 一次采集全部无线指标（注册/信号/服务小区/承载），含怪癖纠偏
+    // 一次采集全部无线指标（注册/信号/服务小区/承载），含厂商No-3GPP特性纠偏
     virtual bool getDiagSnapshot(DiagSnapshot& out) = 0;
 
     // 仅采集信号与服务小区（单条 AT+QENG="servingcell"，不发注册/承载查询）：

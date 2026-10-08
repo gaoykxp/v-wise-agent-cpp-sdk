@@ -205,7 +205,15 @@ namespace cmsr {
                     // 按照zd_wrapper.h里面定义的json格式填充
                     jpb["system"]["imei"] = devInfo.imei;
                     jpb["system"]["sn"] = devInfo.sn;
-                    jpb["system"]["hw_version"] = devInfo.hardware_version;
+                    // 硬件版本：树莓派 /proc/cpuinfo Revision（硬件修订号，运行期不变），
+                    // 仅 SDK 启动后首条成功读取的消息携带一次，与 modem_version 同机制。
+                    // 未读到时（非树莓派环境/cpuinfo 无 Revision 行）不置标志，
+                    // 下一 Full 周期重读，直到拿到为止
+                    static bool s_hwVersionSent = false;
+                    if (!s_hwVersionSent && !devInfo.hardware_version.empty()) {
+                        jpb["system"]["hw_version"] = devInfo.hardware_version;
+                        s_hwVersionSent = true;
+                    }
                     // 模组固件版本：AT 实测（AT+CGMR → "RM520NGLAAR03A03M4G"），
                     // 仅 SDK 启动后首条成功读取的消息携带一次（固件运行期不变，
                     // 逐条重复携带浪费流量，平台持久化首值即可）。
@@ -259,6 +267,9 @@ namespace cmsr {
             static ::vwise::modem::DiagSnapshot s_snap;
             // error_code 边沿过滤：状态未变化期间省略字段（详见 cellular_diagnosis.h）
             static ErrorCodeEdgeFilter s_errorCodeEdge;
+            // 4/5G 制式切换检测：LTE↔NR5G 跳变的周期随消息携带 G4G5_SWITCH
+            //（与 s_errorCodeEdge 同为单实例单流，两路径共用）
+            static RatSwitchDetector s_ratSwitch;
 
             const int64_t nowMs = base_tools::BaseTimer::GetMilliTime();
             if (nowMs - s_lastSlowAtMs >= kSlowAtRefreshMs) {
@@ -308,6 +319,26 @@ namespace cmsr {
                     }
                 }
             }
+
+            // ==================== REBOOT 检测（模组启动完成 "PB DONE"） ====================
+            // 判定依据：运行期 URC +QIND: "PB DONE"（模组启动/重启完成）→ 随本条
+            // 消息的 error_code 携带 REBOOT。URC 原始行入日志与 handler 注册无关
+            // （rpi_at_client 派发前先入缓存），驱动/回退两路径均可检出。
+            // 注：SDK 启动早于模组启动完成时，PB DONE URC 同样落在日志窗口内，
+            // 首周期即可检出；SDK 启动晚于模组启动完成的场景无事件可检（不做
+            // 主动查询，避免占用周期 AT 与固件兼容性问题）
+            static bool s_bootPending = false;
+
+            // URC 窗口取走（drain 自 diag 节点处前移至此：PB DONE 需在本周期
+            // error_code 判定前可见；窗口语义不变——两次 drain 之间 ≈3s，周期首
+            // 取走并清空。diag.urc 字段由下方使用本批行拼装）
+            auto urcLines = module.atClient().drain_urc_log();
+            for (const auto& l : urcLines) {
+                if (l.find("PB DONE") != std::string::npos) s_bootPending = true;
+            }
+            // 本条消息是否携带 REBOOT（消费即清；cpu 早退周期未达此处则保留待下周期）
+            const bool rebootCodeThisMsg = s_bootPending;
+            s_bootPending = false;
 
             // ==================== 无线数据 ====================
             // 信号/服务小区：每周期仅一条 AT+QENG="servingcell"（快路径）覆盖缓存；
@@ -359,11 +390,32 @@ namespace cmsr {
                 // （AT+CGMI/CGMM/CGMR 实测值，见上方 getDeviceInfo 段；profile 里是驱动
                 // 画像标签，与实物可能不同族成员，不作上报来源）
 
-                // error_code 边沿上报：仅出现/变化/消失的周期携带字段，未变化期间省略
-                const std::string ecDriver = deriveWirelessErrorCode(
-                    simInfo, snap, m_noNetLTEThr, m_noNet5GThr);
-                if (s_errorCodeEdge.changed(ecDriver)) {
-                    jpb["wireless"]["error_code"] = ecDriver;
+                // 4/5G 制式切换检测：本周期有效 RAT（QENG 已归一为 NR5G/LTE）与
+                // 上周期比较。检测须每周期执行（基线逐周期推进），上报时按
+                // 优先级取舍（见下方）；QENG 瞬时失败保留旧值，不会假触发
+                bool ratSwitched = false;
+                if (sig.valid) {
+                    ratSwitched = s_ratSwitch.switched(sig.rat);
+                }
+
+                // error_code 边沿上报：仅出现/变化/消失的周期携带字段，未变化期间省略。
+                // REBOOT 周期（PB DONE 检出）例外：输出事件型 REBOOT（不喂边沿
+                // 过滤器，保持其无历史状态，下一周期按首周期语义携带一次真实
+                // 状态值——避免本拍被过滤的真实错误值在后续周期被误判为
+                // "未变化"而漏报）
+                if (rebootCodeThisMsg) {
+                    jpb["wireless"]["error_code"] = kErrorCodeReboot;
+                } else {
+                    const std::string ecDriver = deriveWirelessErrorCode(
+                        simInfo, snap, m_noNetLTEThr, m_noNet5GThr);
+                    if (s_errorCodeEdge.changed(ecDriver)) {
+                        jpb["wireless"]["error_code"] = ecDriver;
+                    } else if (ratSwitched) {
+                        // 同周期冲突时状态错误优先于切换事件（消抖使状态值通常
+                        // 晚一拍上报，两者实际撞车窗口极小；撞车时切换事件丢弃，
+                        // 新制式仍由本条消息的 net_type 体现）
+                        jpb["wireless"]["error_code"] = kErrorCodeRatSwitch;
+                    }
                 }
             } else {
                 // ---- 回退路径：boards 层原查询（无方言层驱动时保持可用）----
@@ -384,12 +436,25 @@ namespace cmsr {
                     jpb["wireless"]["reg_stat"] = regStatStringFallback(cell_info.reg_stat);
                 }
 
+                // 4/5G 制式切换检测（回退路径，同驱动路径：检测每周期执行）
+                bool ratSwitched = false;
+                if (wirelessInfo.signal_valid) {
+                    ratSwitched = s_ratSwitch.switched(signalInfo.technology);
+                }
+
                 // error_code 边沿上报（回退路径与驱动路径共用同一过滤实例——同一台
-                // 设备只有一条 error_code 流）：仅变化周期携带字段，未变化期间省略
-                const std::string ecFallback = deriveWirelessErrorCodeFallback(
-                    wirelessInfo, simFault, m_noNetLTEThr, m_noNet5GThr);
-                if (s_errorCodeEdge.changed(ecFallback)) {
-                    jpb["wireless"]["error_code"] = ecFallback;
+                // 设备只有一条 error_code 流）：仅变化周期携带字段，未变化期间省略。
+                // REBOOT 周期的处理与冲突优先级同驱动路径（见上方注释）
+                if (rebootCodeThisMsg) {
+                    jpb["wireless"]["error_code"] = kErrorCodeReboot;
+                } else {
+                    const std::string ecFallback = deriveWirelessErrorCodeFallback(
+                        wirelessInfo, simFault, m_noNetLTEThr, m_noNet5GThr);
+                    if (s_errorCodeEdge.changed(ecFallback)) {
+                        jpb["wireless"]["error_code"] = ecFallback;
+                    } else if (ratSwitched) {
+                        jpb["wireless"]["error_code"] = kErrorCodeRatSwitch;
+                    }
                 }
             }
 
@@ -404,7 +469,8 @@ namespace cmsr {
                 jpb["diag"]["reg_stat_ps"] = snap.reg.ps_stat;     // EPS 域（-1=查询失败）
                 jpb["diag"]["reg_stat_cs"] = snap.reg.cs_stat;     // CS 域（短信通道）
                 jpb["diag"]["reg_stat_5g"] = snap.reg.stat_5g;     // 5GS 域（SA 注册事实来源）
-                jpb["diag"]["reg_cause"] = snap.reg.reject_cause;   // 拒绝原因码（CEREG 第 6 段）
+                jpb["diag"]["reg_cause"] = snap.reg.reject_cause;   // 拒绝原因码（CEREG，EMM cause）
+                jpb["diag"]["reg_cause_5g"] = snap.reg.reject_cause_5g; // 5GS 域拒绝原因码（C5GREG/Q5GREG，5GMM cause；SA 网被拒时的事实来源）
                 jpb["diag"]["pdp_active"] = snap.bearer.pdp_active; // PDP 持有有效 IP
                 jpb["diag"]["ue_ip"] = snap.bearer.ip;              // UE 侧 PDP 地址
                 if (!snap.ceer.empty()) {
@@ -413,18 +479,16 @@ namespace cmsr {
             }
 
             // ---- diag.urc：本周期（3s 窗口）内收到的 URC 原始行，拼接上传 ----
-            // 周期首取走并清空缓存（窗口=两次 drain 之间，≈3s）；无 URC 则不携带字段。
-            // 刷新拍与 urc 同帧共存；非刷新拍仅有 URC 时 diag 节点只含 urc
-            {
-                auto urcLines = module.atClient().drain_urc_log();
-                if (!urcLines.empty()) {
-                    std::string urcStr;
-                    for (size_t i = 0; i < urcLines.size(); ++i) {
-                        if (i > 0) urcStr += "\n";
-                        urcStr += urcLines[i];
-                    }
-                    jpb["diag"]["urc"] = urcStr;
+            //（drain 已前移至 REBOOT 检测处，此处使用该批行；窗口=两次 drain
+            //  之间 ≈3s，无 URC 则不携带字段。刷新拍与 urc 同帧共存；非刷新拍
+            //  仅有 URC 时 diag 节点只含 urc）
+            if (!urcLines.empty()) {
+                std::string urcStr;
+                for (size_t i = 0; i < urcLines.size(); ++i) {
+                    if (i > 0) urcStr += "\n";
+                    urcStr += urcLines[i];
                 }
+                jpb["diag"]["urc"] = urcStr;
             }
 
             std::string apn;

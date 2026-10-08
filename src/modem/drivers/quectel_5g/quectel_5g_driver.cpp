@@ -133,16 +133,19 @@ void Quectel5GDriver::registerUrcHandlers() {
 
 void Quectel5GDriver::queryRegistration(RegInfo& out) {
     // 5GS 域：标准 C5GREG 优先，Quectel 私有 Q5GREG 兜底（SA 下 EPS CEREG 恒 0，
-    // 5GS 域才是注册事实来源——quirk_cereg_zero_on_sa）
+    // 5GS 域才是注册事实来源——quirk_cereg_zero_on_sa）。
+    // 拒绝原因码同步解析（5GMM cause，TS 24.501；响应结构与 CEREG 同构，
+    // parseRegLine 仅在 stat==3 且含第 7 段时取值——固件查询响应不带原因段时
+    // 恒为 0，语义层按"无原因码"降级，不误判）
     if (profile().has_c5greg) {
         auto r = ch_->command("AT+C5GREG?", 1500);
         for (const auto& l : r.lines)
-            if (parseRegLine(l, "+C5GREG:", out.stat_5g)) break;
+            if (parseRegLine(l, "+C5GREG:", out.stat_5g, &out.reject_cause_5g)) break;
     }
     if (out.stat_5g < 0 && profile().has_q5greg) {
         auto r = ch_->command("AT+Q5GREG?", 1500);
         for (const auto& l : r.lines)
-            if (parseRegLine(l, "+Q5GREG:", out.stat_5g)) break;
+            if (parseRegLine(l, "+Q5GREG:", out.stat_5g, &out.reject_cause_5g)) break;
     }
 
     // EPS 域（含拒绝原因码）
@@ -344,7 +347,7 @@ bool Quectel5GDriver::getDiagSnapshot(DiagSnapshot& out) {
         if (getExtendedError(text)) out.ceer = text;
     }
 
-    // ---- 怪癖纠偏（集中此处，profile 标志驱动）----
+    // ---- 厂商No-3GPP特性纠偏（集中此处，profile 标志驱动）----
     // 1) SA 下 CEREG 恒 0：注册事实看 5GS 域（ueRegistered 已综合）
     // 2) PDP 持有效 IP ⇒ 数据承载在通、实际已注册（注册查询失真兜底）
     out.effective_registered = out.reg.ueRegistered();
@@ -433,8 +436,11 @@ void Quectel5GDriver::onCfun(const std::string& line) {
 }
 
 void Quectel5GDriver::onQind(const std::string& line) {
+    // +QIND: "PB DONE" 模组启动完成（phonebook 就绪）→ ModuleBoot（与 RDY 同语义，
+    // error_code 的 REBOOT 判定见 probe_manager：URC PB DONE）；
     // +QIND: "act",<act> 制式变化；其余（csq/smsfull 等）仅日志
-    if (line.find("\"act\"") != std::string::npos) emit(DiagEvent::RatChange, line);
+    if (line.find("PB DONE") != std::string::npos) emit(DiagEvent::ModuleBoot, line);
+    else if (line.find("\"act\"") != std::string::npos) emit(DiagEvent::RatChange, line);
     else LogInfo << "[Quectel5G] URC QIND: " << line;
 }
 
