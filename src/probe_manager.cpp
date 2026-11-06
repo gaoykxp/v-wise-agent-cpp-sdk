@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <thread>
 #include <vector>
@@ -199,6 +200,10 @@ namespace cmsr {
                 jpb["system"]["cpu_util"] = static_cast<int>(cpuUsage);
             }
 
+            // REBOOT 待报标志（声明前移：SDK 启动触发点在下方 system 段，
+            // 消费点在下方 REBOOT 检测段）
+            static bool s_bootPending = false;
+
             if (m_collectCategory == CollectFull) {
                 rpi::DeviceInfo devInfo;
                 if (module.getDeviceInfo(devInfo)) {
@@ -233,6 +238,12 @@ namespace cmsr {
                 if (!s_swVersionSent) {
                     jpb["system"]["sw_version"] = VWISE_SDK_VERSION;
                     s_swVersionSent = true;
+                    // SDK 启动 REBOOT（一次性）：sw_version 首次携带即 SDK 进程
+                    // 启动完成的标志事件（编译期常量，无 AT 依赖，首条 Full 消息
+                    // 必触发），置 REBOOT 待报标志——随本条消息的 error_code 携带
+                    // REBOOT（消费点在下方 REBOOT 检测段，与模组重启的 PB DONE
+                    // 判定共用上报路径与边沿过滤豁免语义）。进程每次启动各报一次
+                    s_bootPending = true;
                 }
                 jpb["system"]["mem_util"] = static_cast<int>(module.getMemoryUsage());
             }
@@ -320,14 +331,18 @@ namespace cmsr {
                 }
             }
 
-            // ==================== REBOOT 检测（模组启动完成 "PB DONE"） ====================
-            // 判定依据：运行期 URC +QIND: "PB DONE"（模组启动/重启完成）→ 随本条
-            // 消息的 error_code 携带 REBOOT。URC 原始行入日志与 handler 注册无关
-            // （rpi_at_client 派发前先入缓存），驱动/回退两路径均可检出。
-            // 注：SDK 启动早于模组启动完成时，PB DONE URC 同样落在日志窗口内，
-            // 首周期即可检出；SDK 启动晚于模组启动完成的场景无事件可检（不做
-            // 主动查询，避免占用周期 AT 与固件兼容性问题）
-            static bool s_bootPending = false;
+            // ==================== REBOOT 检测 ====================
+            // 判定依据（任一命中即随本条消息 error_code 携带 REBOOT）：
+            //   1) 运行期 URC +QIND: "PB DONE"（模组启动/重启完成）——URC 原始行
+            //      入日志与 handler 注册无关（rpi_at_client 派发前先入缓存），
+            //      驱动/回退两路径均可检出。SDK 启动早于模组启动完成时，横幅
+            //      经 connect() 预置前缀同样入日志窗口，首周期即可检出
+            //   2) SDK 进程启动：首条 Full 消息携带 sw_version（VWISE_SDK_VERSION
+            //      编译期常量，无 AT 依赖）时置位（上方 system 段）——SDK 进程
+            //      重启 → 静态量复位 → 每次进程启动各报一次
+            // 触发 2) 补上了"SDK 晚于模组启动完成"的盲区：该场景无 PB DONE
+            // 可检（事件已错过），以 sw_version 首携带作为启动标志事件
+            //（s_bootPending 声明已前移至 system 段之前）
 
             // URC 窗口取走（drain 自 diag 节点处前移至此：PB DONE 需在本周期
             // error_code 判定前可见；窗口语义不变——两次 drain 之间 ≈3s，周期首
@@ -382,7 +397,7 @@ namespace cmsr {
                 // UE 驻网态（QENG <state>，3s 快变）：LIMSRV=已驻留未注册，指向 SIM/签约/
                 // 网络侧而非模组硬件。EN-DC 仅状态行时 cell.valid=false 但 ue_state 有效，
                 // 故置于 cell 门控之外
-                jpb["wireless"]["ue_state"] = ueStateName(snap.cell.ue_state);
+                jpb["wireless"]["ueStat"] = ueStateName(snap.cell.ue_state);
                 // 注册状态：3GPP 三域综合 + PDP 事实纠偏（effective_registered）
                 jpb["wireless"]["reg_stat"] = regStatString(snap);
 
@@ -455,6 +470,73 @@ namespace cmsr {
                     } else if (ratSwitched) {
                         jpb["wireless"]["error_code"] = kErrorCodeRatSwitch;
                     }
+                }
+            }
+
+            // ---- 外网连通性探测（ping www.baidu.com，驱动/回退两路径共用） ----
+            // 后台线程 + 最新值缓存：本周期先上报上一轮结果，再触发新一轮探测，
+            // 探测不占用采集周期（不再同步阻塞 ~1s）。首轮无值报 -1，
+            // 此后成功为时延数字（ms，含 DNS 解析耗时），失败为 -1
+            // （与平台指令 ping 任务的 delay=-1 失败语义一致）。
+            // 流量开销：每周期 1 个 ICMP 包（~100B），可忽略。
+            {
+                static std::mutex s_pingMtx;
+                static bool s_pingHasValue = false;   // 是否已有首轮结果
+                static bool s_pingOk = false;         // 最近一轮是否成功
+                static double s_pingMs = 0.0;         // 最近一轮时延（ms）
+                static bool s_pingInFlight = false;   // 探测线程在飞（防堆积）
+
+                // 1) 上报缓存值（锁内快照，避免与探测线程写竞争）
+                bool hasVal = false, ok = false;
+                double val = 0.0;
+                {
+                    std::lock_guard<std::mutex> lk(s_pingMtx);
+                    hasVal = s_pingHasValue;
+                    ok = s_pingOk;
+                    val = s_pingMs;
+                }
+                // 上报 int（小数截断，与平台指令 ping 任务的 stoi 语义一致）
+                jpb["wireless"]["ping"] = (hasVal && ok) ? static_cast<int>(val) : -1;
+
+                // 2) 触发新一轮探测：上一轮未结束（周期被拉长/系统繁忙）则跳过，
+                //    不排队不堆积
+                bool launch = false;
+                {
+                    std::lock_guard<std::mutex> lk(s_pingMtx);
+                    if (!s_pingInFlight) {
+                        s_pingInFlight = true;
+                        launch = true;
+                    }
+                }
+                if (launch) {
+                    std::thread([] {
+                        double ms = 0.0;
+                        bool okPing = false;
+                        FILE* fp = ::popen("ping -c 1 -W 1 www.baidu.com 2>/dev/null", "r");
+                        if (fp) {
+                            char buf[512];
+                            std::string out;
+                            while (::fgets(buf, sizeof(buf), fp)) out += buf;
+                            const int rc = ::pclose(fp);   // 0=ping 成功
+                            const size_t tpos = out.find("time=");
+                            if (rc == 0 && tpos != std::string::npos) {
+                                const size_t mend = out.find(" ms", tpos);
+                                if (mend != std::string::npos) {
+                                    try {
+                                        ms = std::stod(out.substr(tpos + 5, mend - (tpos + 5)));
+                                        okPing = true;
+                                    } catch (const std::exception&) {
+                                        // time= 字段非数字（异常输出），按失败处理
+                                    }
+                                }
+                            }
+                        }
+                        std::lock_guard<std::mutex> lk(s_pingMtx);
+                        s_pingHasValue = true;
+                        s_pingOk = okPing;
+                        s_pingMs = ms;
+                        s_pingInFlight = false;
+                    }).detach();
                 }
             }
 

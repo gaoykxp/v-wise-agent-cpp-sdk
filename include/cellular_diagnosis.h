@@ -47,12 +47,16 @@ namespace cmsr {
             bool simFault, int lteThr, int nrThr);
 
         // ==================== REBOOT（事件型枚举值，第 7 值） ====================
-        // 模组启动完成事件，不参与上方状态优先级链（无法从快照推导）。判定机制
-        // （检测逻辑见 probe_manager）：运行期 URC +QIND: "PB DONE"（模组启动/
-        // 重启完成）→ 随下一条消息的 wireless.error_code 携带 "REBOOT"；该拍
-        // 跳过边沿过滤（保持无历史状态），下一周期按首周期语义携带一次真实
-        // 状态值，此后回归边沿上报。SDK 启动早于模组启动完成时首周期即可检出；
-        // 晚于启动完成的场景无事件可检（不做主动查询）。
+        // 启动完成事件，不参与上方状态优先级链（无法从快照推导）。判定依据
+        // （检测逻辑见 probe_manager，任一命中即随下一条消息的 wireless.error_code
+        // 携带 "REBOOT"）：
+        //   1) 运行期 URC +QIND: "PB DONE"（模组启动/重启完成；SDK 启动早于
+        //      模组启动完成时经 connect() 预置前缀首周期可检出）
+        //   2) SDK 进程启动：首条 Full 消息携带 sw_version（编译期常量，无 AT
+        //      依赖）即触发——补上 SDK 晚于模组启动完成的盲区，SDK 进程每次
+        //      启动各报一次
+        // REBOOT 拍跳过边沿过滤（保持无历史状态），下一周期按首周期语义携带
+        // 一次真实状态值，此后回归边沿上报。
         inline constexpr const char *kErrorCodeReboot = "REBOOT";
 
         // ==================== G4G5_SWITCH（事件型枚举值，第 8 值） ====================

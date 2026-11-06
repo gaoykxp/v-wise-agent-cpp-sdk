@@ -71,6 +71,23 @@ bool AtClient::connect(const std::string& port_name, int baud_rate)
         return false;
 
     acc_.reset();
+    // 预置标准 URC 前缀（boards init 与方言层驱动注册集合的并集，仅日志
+    // handler，后续正式注册按同前缀覆盖）。必要性：connect() 的 ATE0 握手
+    // 期间模组可能恰在开机（RDY / +CFUN: 1 / +QIND: "PB DONE" 等开机横幅），
+    // 而正式 handler 要到 init() 才注册——若前缀表为空，横幅行会被 reader
+    // 判为普通响应行缓冲进 ATE0 的响应，进不了 urc_log_，导致 error_code
+    // 的 REBOOT 判定（+QIND: "PB DONE"）在此场景漏检。预置后横幅走 URC
+    // 路径入日志缓存；与查询同前缀的注册类（+CEREG 等）由
+    // isCollidingResponseLine 保证不被吞——ATE0 在飞时不拦截任何 URC 前缀。
+    for (const char* p : {"RDY", "POWERED DOWN", "+CFUN:", "+CPIN:", "+QSIMSTAT:",
+                          "+QUIMSLOT:", "+QUSIM:", "+QIND:", "+CSCON:", "+CGEV:",
+                          "+CTZV:", "+CTZE:", "+CNEC:", "+CMTI:", "+C5GREG:",
+                          "+Q5GREG:", "+CEREG:", "+CREG:", "+QNETDEVSTATUS:"}) {
+        urc_.register_handler(p, [](const std::string& l) {
+            // 预置占位：reader 的 [URC] 行已有 INFO 级高亮，此处仅 debug 留痕
+            LogDebug << "[URC pre-init] " << l;
+        });
+    }
     urc_.start();
     reading_ = true;
     reader_ = std::thread(&AtClient::reader_loop, this);
