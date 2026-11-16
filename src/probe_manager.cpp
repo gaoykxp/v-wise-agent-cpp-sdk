@@ -8,6 +8,9 @@
 #include "ota_manager.h"
 #include "base_timer.h"
 #include "cellular_diagnosis.h"   // error_code/reg_stat/ue_state 判定统一单元
+#include "dup_sel_controller.h"   // 双链路远控 P0-P2
+#include "ebpf_loader.h"
+#include "link_monitor.h"
 #include "rpi_gps_info.h"
 #include "global.h"
 #include "log.h"
@@ -777,6 +780,11 @@ namespace cmsr {
                                 TOPIC_DVICE_VW_FAULT_ACK.insert(14, m_imei);
                             }
 
+                            // 双链路远控主题（新增，本地构造，不依赖远端配置下发）
+                            TOPIC_DVICE_LINK_STATUS_UP    = "vwise/" + m_imei + "/link/status/up";
+                            TOPIC_PLAT_LINK_MODE_DOWN     = "vwise/" + m_imei + "/link/mode/down";
+                            TOPIC_PLAT_LINK_MODE_DOWN_ACK = "vwise/" + m_imei + "/link/mode/down/ack";
+
                             if (jMqtt["Ping"].is_string())// 配置ping ip
                             {
                                 string pingIp;
@@ -798,6 +806,9 @@ namespace cmsr {
                 }
                 if (!TOPIC_DVICE_VW_FAULT_ACK.empty()) {
                     broker.topics.push_back(TOPIC_DVICE_VW_FAULT_ACK);
+                }
+                if (!TOPIC_PLAT_LINK_MODE_DOWN.empty()) {
+                    broker.topics.push_back(TOPIC_PLAT_LINK_MODE_DOWN);
                 }
 
                 LogInfo << "TOPIC_PLAT_ORDER_DOWN:" << TOPIC_PLAT_ORDER_DOWN;
@@ -1310,6 +1321,7 @@ namespace cmsr {
             handleMap = {
                     {"/sys/commands", [this](std::string input, std::string topic) { proccessTaskMgr(input, topic); }},
                     {"/user/mgr/up/ack", [this](std::string input, std::string topic) { proccessUserOnline(input, topic); }},
+                    {"/link/mode/down", [this](std::string input, std::string topic) { proccessLinkModeDown(input, topic); }},
                     {"ack", [this](std::string input, std::string topic) { proccessZDFaultAck(input, topic); }}};
             // base_tools::util::creatFilePath("/mnt/data/log/ProbeLog");
 
@@ -1320,6 +1332,9 @@ namespace cmsr {
 
             readJsonFile("/etc/rw.conf");
             mqtt.start(ProbeManager::receiveMsgHandler, broker);
+
+            // 双链路远控（P0-P2）：MQTT 就绪后启动 LinkMonitor + DupSelController
+            startDupSel();
 
             // 周期采集数据断连缓存初始化（config.json -> Vwise.OfflineCache）
             {
@@ -1360,11 +1375,136 @@ namespace cmsr {
 
         void ProbeManager::probeMgrStop() {
             LogInfo << "probeMgrStop ...";
+            DupSelController::getInstance().stop();
+            LinkMonitor::getInstance().stop();
             PING::getInstance().stop();
             rpi::RPIModuleInterface::getInstance().deinit();
             m_timerUser.stop();
             m_timerHB.stop();
             mqtt.stop();
+        }
+
+        // ==================== 双链路远控（P0-P2）====================
+
+        void ProbeManager::startDupSel() {
+            // 配置：config.json -> Vwise.DupSel（缺省关闭，向后兼容单链路部署）
+            const auto &root = common::GlobalData::Instance()->getJson();
+            if (!root.contains("Vwise") || !root["Vwise"].is_object()) return;
+            const auto &vwise = root["Vwise"];
+            if (!vwise.contains("DupSel") || !vwise["DupSel"].is_object()) {
+                LogInfo << "DupSel config absent, dual-link disabled";
+                return;
+            }
+            const auto &ds = vwise["DupSel"];
+            if (!ds.value("Enable", 1)) {
+                LogInfo << "DupSel.Enable=0, dual-link disabled";
+                return;
+            }
+
+            // 链路列表
+            std::vector<LinkConfig> links;
+            if (ds.contains("Links") && ds["Links"].is_array()) {
+                int id = 0;
+                for (const auto &l : ds["Links"]) {
+                    if (!l.is_object()) continue;
+                    LinkConfig lc;
+                    lc.id = id++;
+                    lc.name = l.value("Name", "link" + std::to_string(lc.id));
+                    lc.ifname = l.value("Ifname", "");
+                    lc.anchor_ip = l.value("AnchorIp", "");
+                    lc.anchor_port = l.value("AnchorPort", 0);
+                    lc.local_port = l.value("LocalPort", 0);
+                    if (lc.anchor_ip.empty() || lc.anchor_port == 0) {
+                        LogWarn << "DupSel link[" << lc.name << "] invalid anchor, skipped";
+                        continue;
+                    }
+                    links.push_back(lc);
+                }
+            }
+            if (links.empty()) {
+                LogWarn << "DupSel: no valid links, dual-link disabled";
+                return;
+            }
+
+            // 探测参数
+            ProbeConfig pc;
+            if (ds.contains("Probe") && ds["Probe"].is_object()) {
+                const auto &p = ds["Probe"];
+                pc.interval_ms = p.value("IntervalMs", 1000);
+                pc.train_pkts = p.value("TrainPkts", 60);
+                pc.train_rate_kbps = p.value("TrainRateKbps", 4000.0);
+                pc.train_period_sec = p.value("TrainPeriodSec", 10);
+            }
+
+            // 门限
+            DupSelThresholds th;
+            if (ds.contains("Thresholds") && ds["Thresholds"].is_object()) {
+                const auto &t = ds["Thresholds"];
+                th.rtt_bad_ms = t.value("RttBadMs", 150.0);
+                th.loss_bad_pct = t.value("LossBadPct", 5.0);
+                th.confirm_n = t.value("ConfirmN", 3);
+                th.report_period_ms = t.value("ReportPeriodMs", 5000);
+            }
+
+            // eBPF（可关；失败自动降级用户态模式）
+            static EbpfLoader ebpf;
+            bool want_ebpf = ds.value("EbpfEnable", 1) != 0;
+            EbpfLoader *ebpf_ptr = nullptr;
+            if (want_ebpf) {
+                std::vector<std::string> nics;
+                if (ds.contains("EbpfNics") && ds["EbpfNics"].is_array())
+                    for (const auto &n : ds["EbpfNics"]) nics.push_back(n.get<std::string>());
+                if (nics.empty())
+                    for (auto &lc : links)
+                        if (!lc.ifname.empty()) nics.push_back(lc.ifname);
+                std::string obj = ds.value("EbpfObj", std::string("vwise_dup.bpf.o"));
+                if (ebpf.load(obj, nics)) {
+                    ebpf_ptr = &ebpf;
+                } else {
+                    LogWarn << "eBPF load failed -> user-space fallback";
+                }
+            }
+
+            // LinkMonitor 日志接入 spdlog + v2 CTRL 指令接入状态机
+            LinkMonitor::getInstance().setLogger([](int lvl, const std::string &msg) {
+                switch (lvl) {
+                    case LinkMonitor::LOG_DBG: LogDebug << msg; break;
+                    case LinkMonitor::LOG_INF: LogInfo << msg; break;
+                    case LinkMonitor::LOG_WRN: LogWarn << msg; break;
+                    default: LogError << msg; break;
+                }
+            });
+            LinkMonitor::getInstance().setCtrlHandler([](const std::string &json) {
+                return DupSelController::getInstance().onCommand(json);
+            });
+            if (!LinkMonitor::getInstance().start(links, pc)) {
+                LogError << "LinkMonitor start failed";
+                return;
+            }
+
+            // DupSelController：状态发布 → MQTT（复用 status/up 主题）
+            DupSelController::getInstance().setStatusPublisher(
+                [this](const std::string &payload) {
+                    mqtt.sendOnce(TOPIC_DVICE_LINK_STATUS_UP, payload);
+                });
+            DupSelController::getInstance().start(ebpf_ptr, th);
+            LogInfo << "DupSel started: links=" << links.size()
+                    << " mode=" << DupSelController::getInstance().modeName()
+                    << " ebpf=" << (ebpf_ptr ? "on" : "fallback");
+        }
+
+        void ProbeManager::proccessLinkModeDown(std::string input, std::string topic) {
+            LogInfo << "proccessLinkModeDown, topic:" << topic << ", input:" << input;
+
+            int rc = DupSelController::getInstance().onCommand(input);
+
+            // 回 ACK
+            nlohmann::json j;
+            j["imei"] = m_imei;
+            j["result"] = (rc == 0) ? 0 : 1;
+            j["mode"] = DupSelController::getInstance().modeName();
+            j["time"] = base_tools::util::sysTimeMqtt();
+            mqtt.sendOnce(TOPIC_PLAT_LINK_MODE_DOWN_ACK, j.dump());
         }
     }// end namespace vwise
 }// end namespace cmsr

@@ -120,15 +120,62 @@ set(MODEM_SRCS
         ${MODEM_DRIVER_SRCS}
 )
 
-# Remove original files that were replaced by stubs
+# Remove original files that were replaced by stubs，并排除独立工具的 main
 list(REMOVE_ITEM SRCS
     "${PROJECT_SOURCE_DIR}/src/zd_wrapper.cpp"
     "${PROJECT_SOURCE_DIR}/src/zd_gps_info.cpp"
     "${PROJECT_SOURCE_DIR}/src/cell_info.cpp"
     "${PROJECT_SOURCE_DIR}/src/minio.cpp"
+    "${PROJECT_SOURCE_DIR}/src/duptest_main.cpp"
 )
 
+# ==================== 双链路远控：eBPF（P1，可选）====================
+# libbpf >= 1.0 时启用内核态双发（VWISE_EBPF）；Ubuntu 22.04 apt 版本(0.5)过旧，
+# 需源码编译 libbpf（见《P0-P2实施与测试方案.md》）。缺失时自动编译为空实现，
+# DupSelController 降级为用户态双发路径。
+find_library(LIBBPF_LIB NAMES bpf)
+find_path(LIBBPF_INCLUDE_DIR NAMES bpf/libbpf.h)
+if(LIBBPF_LIB AND LIBBPF_INCLUDE_DIR AND NOT LIBBPF_LIB STREQUAL "LIBBPF_LIB-NOTFOUND" AND NOT LIBBPF_INCLUDE_DIR STREQUAL "LIBBPF_INCLUDE_DIR-NOTFOUND")
+    message(STATUS "libbpf found: ${LIBBPF_LIB} (${LIBBPF_INCLUDE_DIR})")
+    add_definitions(-DVWISE_EBPF=1)
+    set(VWISE_EBPF_LIBS ${LIBBPF_LIB})
+else()
+    message(WARNING "libbpf not found - eBPF dual-send disabled (user-space fallback)")
+    set(VWISE_EBPF_LIBS "")
+    set(LIBBPF_INCLUDE_DIR "")
+endif()
+
+# eBPF 程序编译（clang target bpf）；缺 clang 时跳过，运行时加载失败自动降级
+# 注意：-target bpf 不继承架构默认 include 路径，须显式加 <arch>-linux-gnu（asm/types.h 所在）
+find_program(CLANG_BPF clang)
+if(CLANG_BPF AND VWISE_EBPF_LIBS)
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/vwise_dup.bpf.o
+        COMMAND ${CLANG_BPF} -target bpf -O2 -g -c
+                ${PROJECT_SOURCE_DIR}/src/ebpf/vwise_dup.bpf.c
+                -I${LIBBPF_INCLUDE_DIR} -I/usr/include/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu
+                -o ${CMAKE_BINARY_DIR}/vwise_dup.bpf.o
+        DEPENDS ${PROJECT_SOURCE_DIR}/src/ebpf/vwise_dup.bpf.c
+        COMMENT "compiling vwise_dup.bpf.o (eBPF TC egress dup)")
+    add_custom_target(ebpf_obj ALL DEPENDS ${CMAKE_BINARY_DIR}/vwise_dup.bpf.o)
+else()
+    message(WARNING "clang not found - vwise_dup.bpf.o will not be built")
+endif()
+
 add_executable(${PROJECT_NAME} ${SRCS} ${COMMON_SRCS} ${MODEM_SRCS} ${STUB_SRCS})
+
+# 双链路远控数据面联调工具（零 SDK 依赖：link_monitor/dedup_engine/dup_sel_controller/ebpf_loader）
+add_executable(vwise_duptest
+    ${PROJECT_SOURCE_DIR}/src/duptest_main.cpp
+    ${PROJECT_SOURCE_DIR}/src/link_monitor.cpp
+    ${PROJECT_SOURCE_DIR}/src/dedup_engine.cpp
+    ${PROJECT_SOURCE_DIR}/src/dup_sel_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/ebpf_loader.cpp)
+target_include_directories(vwise_duptest PRIVATE include ${LIBBPF_INCLUDE_DIR})
+target_link_libraries(vwise_duptest PRIVATE pthread ${VWISE_EBPF_LIBS})
+if(CLANG_BPF AND VWISE_EBPF_LIBS)
+    add_dependencies(vwise_duptest ebpf_obj)
+endif()
 
 link_directories(${CMAKE_CURRENT_SOURCE_DIR}/output)
 
@@ -139,7 +186,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pthread
     dl
     rt
+    ${VWISE_EBPF_LIBS}
 )
+target_include_directories(${PROJECT_NAME} PRIVATE ${LIBBPF_INCLUDE_DIR})
 
 # Link CURL if found
 if(CURL_FOUND)

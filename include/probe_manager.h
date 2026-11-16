@@ -91,6 +91,11 @@ namespace cmsr {
             // 按当前 m_collectIntervalMs 重启主采集定时器
             void restartCollectionTimer();
 
+            // 双链路远控（P0-P2）：启动 LinkMonitor + DupSelController（eBPF 可选）
+            void startDupSel();
+            // 平台链路模式指令处理（topic: .../link/mode/down）
+            void proccessLinkModeDown(std::string input, std::string topic);
+
         public:
             MQTTAPP mqtt;
             std::vector<sTaskMgrInfoPb> vTaskMgr;
@@ -112,6 +117,10 @@ namespace cmsr {
             std::string TOPIC_DVICE_VW_DATA_UP;  //index up for v-wise
             std::string TOPIC_DVICE_VW_FAULT_UP; //index up for v-wise
             std::string TOPIC_DVICE_VW_FAULT_ACK;//index up for v-wise
+            // 双链路远控（P0-P2）：链路状态上报 / 平台模式指令 / 指令 ACK
+            std::string TOPIC_DVICE_LINK_STATUS_UP;   // pub: vwise/<imei>/link/status/up
+            std::string TOPIC_PLAT_LINK_MODE_DOWN;    // sub: vwise/<imei>/link/mode/down
+            std::string TOPIC_PLAT_LINK_MODE_DOWN_ACK;// pub: vwise/<imei>/link/mode/down/ack
 
         public:
             static ProbeManager &getInstance();

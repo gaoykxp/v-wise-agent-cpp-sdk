@@ -29,6 +29,18 @@
         "RtReport": 0,
         "AuthEnable":0,
         "OfflineCache": { "Enable": 1, "MaxAgeMin": 30 },
+        "DupSel": {
+            "Enable": 1,
+            "Probe": { "IntervalMs": 1000, "TrainPkts": 60, "TrainRateKbps": 4000, "TrainPeriodSec": 10 },
+            "Thresholds": { "RttBadMs": 150, "LossBadPct": 5, "ConfirmN": 3, "ReportPeriodMs": 5000 },
+            "Links": [
+                { "Name": "wwan0", "Ifname": "wlan0", "AnchorIp": "172.20.10.2", "AnchorPort": 39001, "LocalPort": 39010 },
+                { "Name": "wwan1", "Ifname": "wlan0", "AnchorIp": "172.20.10.2", "AnchorPort": 39002, "LocalPort": 39011 }
+            ],
+            "EbpfEnable": 1,
+            "EbpfObj": "vwise_dup.bpf.o",
+            "EbpfNics": ["wlan0"]
+        },
         "Ota": {
             "WorkDir": "/mnt/data/ota",
             "SystemdUnit": "v_wise_agent",
