@@ -43,6 +43,9 @@ public:
 
     /* 当前生效模式（VWD_MODE_*） */
     int effectiveMode() const { return mode_.load(); }
+    /* FAILOVER 生效时的强制链路索引（-1=未指定，按 0 处理）——
+     * 用户态发送方据此选择幸存链路，避免固定发链路0 */
+    int forcedLink() const { return forced_link_.load(); }
     const char *modeName() const;
 
     /* eBPF 是否加载成功（false=用户态降级） */
@@ -82,6 +85,7 @@ private:
     DupSelThresholds th_;
     std::atomic<bool> running_{false};
     std::atomic<int> mode_{VWD_MODE_SINGLE_BEST};
+    std::atomic<int> forced_link_{-1}; /* FAILOVER 强制链路（applyMode 写） */
     std::atomic<bool> ebpf_ok_{false};
     std::atomic<int> manual_mode_{-1}; /* -1=auto；手动指令优先 */
     std::thread th_ctrl_;

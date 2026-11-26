@@ -90,6 +90,7 @@ private:
     LinkMonitor &operator=(const LinkMonitor &) = delete;
 
     struct LinkState {
+        static constexpr int kLossWin = 20; /* 丢包滑动窗口（最近 N 个探测） */
         LinkConfig cfg;
         int fd = -1;                       /* 探测 socket */
         std::atomic<uint64_t> probes_sent{0};
@@ -98,9 +99,12 @@ private:
         std::atomic<int> miss_streak{0};
         std::atomic<bool> alive{false};
         std::atomic<double> bw_ewma_kbps{-1.0};
-        /* 探测线程私有（不加锁）：丢包窗口统计 */
-        uint32_t win_sent = 0;
-        uint32_t win_acked = 0;
+        /* 丢包滑动窗口：loss_win/loss_pos 仅探测线程读写；
+         * win_misses/win_fill 原子供 snapshot 跨线程读 */
+        uint8_t loss_win[kLossWin] = {0};
+        int loss_pos = 0;
+        std::atomic<int> win_misses{0};
+        std::atomic<int> win_fill{0};
         uint32_t probe_seq = 0;
         std::thread th;
     };

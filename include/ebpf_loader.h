@@ -9,7 +9,9 @@
 #ifndef TANGO_NEXUS_EBPF_LOADER_H
 #define TANGO_NEXUS_EBPF_LOADER_H
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -47,6 +49,8 @@ private:
     bool loaded_ = false;
     std::vector<std::string> nics_;
     std::vector<uint32_t> attached_ifindexes_;
+    /* ifindex → 本网卡 MAC（写入 ctrl map，供 BPF 重写克隆帧源 MAC） */
+    std::map<uint32_t, std::array<uint8_t, 6>> nic_macs_;
 };
 
 } // namespace vwise

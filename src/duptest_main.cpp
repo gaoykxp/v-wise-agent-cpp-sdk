@@ -18,6 +18,7 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -60,9 +61,27 @@ static std::string json_str(const std::string &j, const std::string &key, const 
     if (e == std::string::npos) return def;
     return j.substr(b + 1, e - b - 1);
 }
+/* 取 key 对应的原始值文本：数组取到匹配 ']'，标量取到 , } 或行尾。
+ * json_str 对 ["a","b"] 只能取到第一个串，数组类型键必须走这里 */
+static std::string json_raw_val(const std::string &j, const std::string &key, const std::string &def) {
+    size_t p;
+    if (!json_find(j, key, p)) return def;
+    size_t e = p;
+    if (j[p] == '[') {
+        int depth = 0;
+        for (; e < j.size(); ++e) {
+            if (j[e] == '[') depth++;
+            else if (j[e] == ']') { if (--depth == 0) { ++e; break; } }
+        }
+    } else {
+        for (; e < j.size(); ++e)
+            if (j[e] == ',' || j[e] == '}' || j[e] == '\n') break;
+    }
+    return j.substr(p, e - p);
+}
+
 /* 提取 "Links": [ {...}, {...} ] 中每个 {...} 元素文本 */
-static std::vector<std::string> json_link_elems(const std::string &j) {
-    std::vector<std::string> out;
+static std::vector<std::string> json_link_elems(const std::string &j) {    std::vector<std::string> out;
     size_t p = j.find("\"Links\"");
     if (p == std::string::npos) return out;
     size_t b = j.find('[', p);
@@ -112,9 +131,9 @@ static TestCfg load_cfg(const std::string &path) {
     tc.ebpf_enable = (int)json_num(data, "EbpfEnable", 1);
     tc.ebpf_obj = json_str(data, "EbpfObj", "vwise_dup.bpf.o");
 
-    /* EbpfNics: 字符串数组 "eth0","wlan0" */
+    /* EbpfNics: 支持 JSON 数组 ["eth0","wlan0"] 与逗号串 "eth0,wlan0" */
     {
-        std::string s = json_str(data, "EbpfNics", "");
+        std::string s = json_raw_val(data, "EbpfNics", "");
         if (!s.empty()) {
             std::string cur;
             s += ',';
@@ -122,7 +141,7 @@ static TestCfg load_cfg(const std::string &path) {
                 if (c == ',') {
                     if (!cur.empty()) tc.ebpf_nics.push_back(cur);
                     cur.clear();
-                } else if (c != '"' && c != ' ' && c != '[' && c != ']') {
+                } else if (!isspace((unsigned char)c) && c != '"' && c != '[' && c != ']') {
                     cur += c;
                 }
             }
@@ -234,6 +253,13 @@ static void session_updown(const SessionCfg &sc) {
             dst[i].sin_addr.s_addr = inet_addr(tc.links[i].anchor_ip.c_str());
         }
 
+        /* 接收线程的 recvfrom 必须 200ms 超时唤醒——否则云端先停发时
+         * rx 线程永久阻塞，g_run=false 后 join 挂死、进程无法退出 */
+        for (int fd : fds) {
+            timeval tv{0, 200 * 1000};
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+
         std::vector<uint8_t> pkt(sc.pkt_bytes > VWD_HDR_SIZE ? sc.pkt_bytes : VWD_HDR_SIZE + 64, 0);
         /* duration<double> → 整型 duration 需显式 duration_cast（同 downlink_sender） */
         const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -241,6 +267,11 @@ static void session_updown(const SessionCfg &sc) {
         auto next_t = std::chrono::steady_clock::now();
         uint32_t seq = 0;
         auto end_at = std::chrono::steady_clock::now() + std::chrono::seconds(sc.duration_s);
+        /* 端点注册（组合模式 kernel/none）：DATA_UP 仅发锚点0，eBPF 克隆副本也带
+         * 锚点0 的目的端口——锚点1 学不到终端端点，下行双发会打到死端点。
+         * 周期向全部锚点显式注册（flow 0xFEED），锚点各自学到 (srcIP:39210) */
+        auto next_reg = std::chrono::steady_clock::now();
+        uint32_t reg_seq = 0;
 
         fprintf(stderr, "[up] start: dup=%s rate=%.0fpps size=%zudB dur=%ds flow=0x%X\n",
                 sc.dup_mode == UpDup::KERNEL ? "kernel" : sc.dup_mode == UpDup::USER ? "user" : "none",
@@ -277,6 +308,21 @@ static void session_updown(const SessionCfg &sc) {
             std::this_thread::sleep_until(next_t);
             next_t += period;
 
+            if (sc.dedup != nullptr && sc.dup_mode != UpDup::USER &&
+                std::chrono::steady_clock::now() >= next_reg) {
+                next_reg += std::chrono::seconds(2);
+                for (size_t i = 0; i < dst.size(); ++i) {
+                    uint8_t reg[VWD_HDR_SIZE + 16];
+                    memset(reg, 0, sizeof(reg));
+                    VwPktHdr *rh = (VwPktHdr *)reg;
+                    vwd_init_hdr(rh, VWD_T_DATA_UP, (uint8_t)i, 0);
+                    rh->flow_id = 0xFEEDu;
+                    rh->seq = ++reg_seq;
+                    rh->t_send_ns = 0;
+                    ::sendto(fds[0], reg, sizeof(reg), 0, (sockaddr *)&dst[i], sizeof(dst[i]));
+                }
+            }
+
             VwPktHdr *h = (VwPktHdr *)pkt.data();
             vwd_init_hdr(h, VWD_T_DATA_UP, 0, 0);
             h->flow_id = sc.flow_id;
@@ -286,17 +332,24 @@ static void session_updown(const SessionCfg &sc) {
                                .count();
 
             if (sc.dup_mode == UpDup::USER && tc.links.size() >= 2) {
-                /* 用户态双发：跟随 DupSelController 生效模式（CTRL/自动状态机可切换）——
+                /* 用户态发送：跟随 DupSelController 生效模式（CTRL/自动状态机可切换）——
                  * dual_dup：两链路各一份（第二份置 F_DUPLICATE）；
-                 * single_best/failover：仅链路0 一份（对照云端 dup 统计应归零） */
-                bool dual = DupSelController::getInstance().effectiveMode() == VWD_MODE_DUAL_DUP;
-                ::sendto(fds[0], pkt.data(), pkt.size(), 0, (sockaddr *)&dst[0], sizeof(dst[0]));
-                if (dual) {
+                 * failover：仅强制链路一份（幸存链路，非固定链路0）；
+                 * single_best：仅链路0 一份（对照云端 dup 统计应归零） */
+                int em = DupSelController::getInstance().effectiveMode();
+                if (em == VWD_MODE_DUAL_DUP) {
+                    ::sendto(fds[0], pkt.data(), pkt.size(), 0, (sockaddr *)&dst[0], sizeof(dst[0]));
                     h->flags = VWD_F_DUPLICATE;
                     ::sendto(fds[1], pkt.data(), pkt.size(), 0, (sockaddr *)&dst[1], sizeof(dst[1]));
                     h->flags = 0;
                     up_sent.fetch_add(2);
                 } else {
+                    int idx = 0;
+                    if (em == VWD_MODE_FAILOVER) {
+                        int fl = DupSelController::getInstance().forcedLink();
+                        if (fl >= 0 && fl < (int)tc.links.size()) idx = fl;
+                    }
+                    ::sendto(fds[idx], pkt.data(), pkt.size(), 0, (sockaddr *)&dst[idx], sizeof(dst[idx]));
                     up_sent.fetch_add(1);
                 }
             } else {
@@ -523,7 +576,9 @@ int main(int argc, char **argv) {
         }
     }
 
-    LinkMonitor::getInstance().stop();
+    /* 先停控制器（reportLoop 经 LinkMonitor 发送，避免向已关闭 fd sendto），
+     * 再停 LinkMonitor——与 agent 侧 probeMgrStop 顺序一致 */
     DupSelController::getInstance().stop();
+    LinkMonitor::getInstance().stop();
     return 0;
 }

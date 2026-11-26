@@ -119,11 +119,10 @@ std::vector<LinkQuality> LinkMonitor::snapshot() const {
         q.bw_ewma_kbps = st.bw_ewma_kbps.load();
         q.probes_sent = st.probes_sent.load();
         q.probes_acked = st.probes_acked.load();
-        /* loss 由探测线程窗口统计，近似取 sent/acked 差 */
-        uint64_t sent = q.probes_sent, acked = q.probes_acked;
-        q.loss_pct = (sent > 0 && acked < sent)
-                         ? 100.0 * (double)(sent - acked) / (double)sent
-                         : 0.0;
+        /* 丢包率：最近 kLossWin 个探测的滑动窗口（累计值对早期丢包永不遗忘，
+         * 链路恢复后长期虚高，DUAL_DUP 退出判定迟钝） */
+        int fill = st.win_fill.load(), miss = st.win_misses.load();
+        q.loss_pct = fill > 0 ? 100.0 * (double)miss / (double)fill : 0.0;
         out.push_back(q);
     }
     return out;
@@ -170,7 +169,6 @@ double LinkMonitor::probeOnce(LinkState &st, uint32_t seq, uint64_t *ack_rate_kb
     uint64_t t0 = now_ns();
     if (::sendto(st.fd, pkt, sizeof(pkt), 0, (sockaddr *)&da, sizeof(da)) < 0) return -1;
     st.probes_sent.fetch_add(1);
-    ++st.win_sent;
 
     /* 等待同 seq ACK（可能收到旧 ACK / CTRL 指令，分别处理） */
     int timeout = pc_.probe_timeout_ms > 0 ? pc_.probe_timeout_ms : 200;
@@ -197,7 +195,6 @@ double LinkMonitor::probeOnce(LinkState &st, uint32_t seq, uint64_t *ack_rate_kb
         if (ack->type != VWD_T_PROBE_ACK || ack->seq != seq) continue;
         double rtt_us = (double)(now_ns() - t0) / 1000.0;
         st.probes_acked.fetch_add(1);
-        ++st.win_acked;
         if (ack_rate_kbps && n >= VWD_PROBE_SIZE) {
             const VwProbeExtra *ex = (const VwProbeExtra *)(rbuf + VWD_HDR_SIZE);
             *ack_rate_kbps = ex->rx_rate_kbps;
@@ -294,6 +291,19 @@ void LinkMonitor::probeLoop(LinkState &st) {
 
         uint32_t seq = ++st.probe_seq;
         double rtt_us = probeOnce(st, seq);
+
+        /* 丢包滑动窗口更新（探测线程独占写 loss_win/loss_pos） */
+        {
+            int miss = (rtt_us >= 0) ? 0 : 1;
+            if (st.win_fill.load() < LinkState::kLossWin) {
+                st.win_fill.fetch_add(1);
+            } else {
+                st.win_misses.fetch_sub(st.loss_win[st.loss_pos]);
+            }
+            st.loss_win[st.loss_pos] = (uint8_t)miss;
+            st.win_misses.fetch_add(miss);
+            st.loss_pos = (st.loss_pos + 1) % LinkState::kLossWin;
+        }
 
         if (rtt_us >= 0) {
             double rtt_ms = rtt_us / 1000.0;

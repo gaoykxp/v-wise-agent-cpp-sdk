@@ -12,6 +12,10 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <array>
 #include <cerrno>
 #include <cstring>
 
@@ -20,6 +24,19 @@ namespace vwise {
 
 static int nic_ifindex(const std::string &nic) {
     return (int)if_nametoindex(nic.c_str());
+}
+
+static std::array<uint8_t, 6> nic_mac(const std::string &nic) {
+    std::array<uint8_t, 6> mac = {0, 0, 0, 0, 0, 0};
+    struct ifreq ifr {};
+    strncpy(ifr.ifr_name, nic.c_str(), IFNAMSIZ - 1);
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        if (ioctl(fd, SIOCGIFHWADDR, &ifr) == 0)
+            memcpy(mac.data(), ifr.ifr_hwaddr.sa_data, 6);
+        close(fd);
+    }
+    return mac;
 }
 
 bool EbpfLoader::load(const std::string &obj_path, const std::vector<std::string> &nics) {
@@ -55,6 +72,7 @@ bool EbpfLoader::load(const std::string &obj_path, const std::vector<std::string
     prog_fd_ = bpf_program__fd(prog);
     ctrl_map_fd_ = bpf_map__fd(m);
     nics_ = nics;
+    nic_macs_.clear();
 
     /* 依次 attach 每张网卡，peer = 列表中相邻网卡（0↔1） */
     for (size_t i = 0; i < nics.size(); ++i) {
@@ -63,6 +81,7 @@ bool EbpfLoader::load(const std::string &obj_path, const std::vector<std::string
             fprintf(stderr, "[ebpf] nic %s not found, skipped\n", nics[i].c_str());
             continue;
         }
+        nic_macs_[ifidx] = nic_mac(nics[i]);
         size_t peer_pos = (i == 0) ? nics.size() - 1 : i - 1;
         uint32_t peer_ifidx = (uint32_t)nic_ifindex(nics[peer_pos]);
         if (peer_ifidx == 0) {
@@ -98,6 +117,13 @@ bool EbpfLoader::attach_to_nic(const std::string &nic, uint32_t ifindex) {
     DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_opts, .prog_fd = prog_fd_, .handle = 1,
                         .priority = 1);
     err = bpf_tc_attach(&hook, &attach_opts);
+    if (err == -EEXIST) {
+        /* 上次进程残留的同 handle/priority 过滤器：摘除后重试 */
+        DECLARE_LIBBPF_OPTS(bpf_tc_opts, rm_opts, .handle = 1, .priority = 1);
+        if (bpf_tc_detach(&hook, &rm_opts) == 0) {
+            err = bpf_tc_attach(&hook, &attach_opts);
+        }
+    }
     if (err != 0) {
         fprintf(stderr, "[ebpf] tc attach failed on %s err=%d\n", nic.c_str(), err);
         return false;
@@ -108,10 +134,15 @@ bool EbpfLoader::attach_to_nic(const std::string &nic, uint32_t ifindex) {
 }
 
 bool EbpfLoader::update_ctrl_map(uint32_t ifindex, int mode, uint32_t peer_ifindex) {
-    struct {
+    struct ctrl_val {
         uint32_t mode;
         uint32_t peer_ifindex;
-    } val = {(uint32_t)mode, peer_ifindex};
+        uint32_t _pad;
+        uint8_t own_mac[6];
+    } val = {(uint32_t)mode, peer_ifindex, 0, {0, 0, 0, 0, 0, 0}};
+    auto it = nic_macs_.find(ifindex);
+    if (it != nic_macs_.end())
+        memcpy(val.own_mac, it->second.data(), 6);
     uint32_t key = ifindex;
     return bpf_map_update_elem(ctrl_map_fd_, &key, &val, BPF_ANY) == 0;
 }
@@ -146,6 +177,19 @@ bool EbpfLoader::set_dup_enabled(bool en) {
 }
 
 void EbpfLoader::unload() {
+    /* 先摘除 tc 过滤器并销毁 clsact——bpf_object__close 只释放 fd，
+     * 已 attach 的过滤器会残留在网卡上（filter 持程序引用），留下脏状态 */
+    for (uint32_t ifidx : attached_ifindexes_) {
+        DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = (int)ifidx,
+                            .attach_point = BPF_TC_EGRESS);
+        DECLARE_LIBBPF_OPTS(bpf_tc_opts, rm_opts, .handle = 1, .priority = 1);
+        if (bpf_tc_detach(&hook, &rm_opts) != 0)
+            fprintf(stderr, "[ebpf] tc detach ifindex=%u failed\n", (unsigned)ifidx);
+        if (bpf_tc_hook_destroy(&hook) != 0)
+            fprintf(stderr, "[ebpf] clsact destroy ifindex=%u failed\n", (unsigned)ifidx);
+    }
+    attached_ifindexes_.clear();
+    nic_macs_.clear();
     if (obj_) {
         bpf_object__close((struct bpf_object *)obj_);
         obj_ = nullptr;
@@ -153,7 +197,6 @@ void EbpfLoader::unload() {
     prog_fd_ = -1;
     ctrl_map_fd_ = -1;
     loaded_ = false;
-    attached_ifindexes_.clear();
 }
 
 } // namespace vwise

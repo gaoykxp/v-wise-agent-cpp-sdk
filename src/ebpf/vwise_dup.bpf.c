@@ -27,6 +27,8 @@
 struct nic_ctrl {
     __u32 mode;         /* VWD_MODE_* */
     __u32 peer_ifindex; /* 对端 DSDA 网卡 ifindex */
+    __u32 _pad;
+    __u8  own_mac[6];   /* 本网卡 MAC：克隆帧源 MAC 重写用 */
 };
 
 /* 每网卡控制项：key = 本网卡 ifindex */
@@ -46,9 +48,17 @@ int vwd_egress_dup(struct __sk_buff *skb)
     if (!(mark & VWD_MARK_RC))
         return TC_ACT_OK;
 
-    /* 2) 防复制风暴：已克隆的副本直接放行（对端 egress 再入点） */
-    if (mark & VWD_MARK_CLONED)
+    /* 2) 防复制风暴：已克隆的副本直接放行（对端 egress 再入点）。
+     *    clone_redirect 复用原网卡的 L2 头（src MAC = 原网卡 MAC），
+     *    同 L2 双口场景（两网卡同网段经同一 AP 网桥）会触发 AP 的 MAC 漂移
+     *    保护丢弃——重写源 MAC 为本网卡 MAC 后再放行 */
+    if (mark & VWD_MARK_CLONED) {
+        __u32 my_ifidx = skb->ifindex;
+        struct nic_ctrl *me = bpf_map_lookup_elem(&nic_ctrl_map, &my_ifidx);
+        if (me)
+            bpf_skb_store_bytes(skb, 6 /* eth src mac */, me->own_mac, 6, 0);
         return TC_ACT_OK;
+    }
 
     /* 3) 模式检查：SDK 用户态通过 map 热切换 */
     __u32 ifidx = skb->ifindex;
@@ -57,8 +67,8 @@ int vwd_egress_dup(struct __sk_buff *skb)
         return TC_ACT_OK;
 
     /* 4) 先置 CLONED 位再克隆：原包与副本都带 CLONED。
-     *    原包继续走本网卡出队（CLONED 位对本程序已无意义），
-     *    副本经 redirect 到对端网卡 egress，被第 2 步放行，杜绝二次克隆。 */
+     *    原包继续走本网卡出队，副本经 redirect 到对端网卡 egress，
+     *    命中第 2 步重写源 MAC 后放行，杜绝二次克隆。 */
     skb->mark = mark | VWD_MARK_CLONED;
     bpf_clone_redirect(skb, c->peer_ifindex, 0 /* egress */);
 

@@ -42,6 +42,7 @@ void DupSelController::start(EbpfLoader *ebpf, const DupSelThresholds &th) {
         fprintf(stderr, "[dupsel] eBPF not loaded -> user-space fallback mode\n");
     }
     mode_.store(VWD_MODE_SINGLE_BEST);
+    forced_link_.store(-1);
     manual_mode_.store(-1);
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -140,6 +141,7 @@ int DupSelController::decideTarget(const std::vector<LinkQuality> &qs, int &forc
 
 void DupSelController::applyMode(int mode, int forced_link, const char *reason) {
     int prev = mode_.exchange(mode);
+    forced_link_.store(forced_link);
     if (prev == mode) return;
 
     if (ebpf_ != nullptr && ebpf_ok_.load()) {
